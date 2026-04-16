@@ -4,6 +4,11 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torchvision import models
 
+try:
+    import timm
+except Exception:  # pragma: no cover - optional dependency fallback
+    timm = None
+
 class TemporalAttention(nn.Module):
     """
     Mecanismo de Atención Temporal (Bahdanau/Luong style adaptado).
@@ -376,3 +381,134 @@ class EmotionFrameLSTM(nn.Module):
                 device=frames.device,
             )
         return self.forward_packed(frames, lengths)
+
+
+class LandmarkEncoder(nn.Module):
+    """MLP encoder for flattened per-frame landmarks."""
+
+    def __init__(self, in_dim: int = 478 * 2, out_dim: int = 256, dropout: float = 0.2):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 512),
+            nn.LayerNorm(512),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.GELU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class MicroExpressionFusionModel(nn.Module):
+    """Two-input temporal model for video clips plus facial landmarks."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        frame_embedding_dim: int = 512,
+        landmark_dim: int = 256,
+        hidden_dim: int = 512,
+        dropout: float = 0.3,
+        imagenet_pretrained: bool = True,
+    ):
+        super().__init__()
+        weights = models.ResNet18_Weights.IMAGENET1K_V1 if imagenet_pretrained else None
+        backbone = models.resnet18(weights=weights)
+        backbone.fc = nn.Identity()
+        self.frame_encoder = backbone
+        self.landmark_encoder = LandmarkEncoder(in_dim=478 * 2, out_dim=landmark_dim, dropout=dropout)
+        self.fusion_proj = nn.Linear(frame_embedding_dim + landmark_dim, hidden_dim)
+        self.fusion_norm = nn.LayerNorm(hidden_dim)
+        self.temporal_attn = TemporalAttention(hidden_dim)
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, num_classes),
+        )
+
+    def _encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        batch_size, time_steps, channels, height, width = frames.shape
+        flat = frames.reshape(batch_size * time_steps, channels, height, width)
+        encoded = self.frame_encoder(flat)
+        return encoded.reshape(batch_size, time_steps, -1)
+
+    def forward(self, frames: torch.Tensor, landmarks: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+        if lengths is None:
+            lengths = torch.full((frames.size(0),), frames.size(1), dtype=torch.long, device=frames.device)
+
+        video_feat = self._encode_frames(frames)
+        landmark_flat = landmarks.reshape(landmarks.size(0), landmarks.size(1), -1)
+        landmark_feat = self.landmark_encoder(landmark_flat)
+
+        fused = torch.cat([video_feat, landmark_feat], dim=-1)
+        fused = self.fusion_norm(self.fusion_proj(fused))
+
+        max_seq_len = fused.size(1)
+        mask = torch.arange(max_seq_len, device=fused.device)[None, :] < lengths[:, None]
+        context, _ = self.temporal_attn(fused, mask)
+        return self.classifier(context)
+
+
+class SwinLandmarkFusionModel(nn.Module):
+    """Draft Swin Transformer + landmark fusion model for multimodal training."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        landmark_in_dim: int = 68 * 2,
+        landmark_embed_dim: int = 256,
+        hidden_dim: int = 1024,
+        dropout: float = 0.3,
+        pretrained: bool = True,
+        max_frames: int = 32,
+    ):
+        super().__init__()
+        if timm is None:
+            raise ImportError("timm is required for SwinLandmarkFusionModel")
+
+        self.backbone = timm.create_model(
+            "swin_base_patch4_window7_224",
+            pretrained=pretrained,
+            num_classes=0,
+            global_pool="avg",
+        )
+        visual_dim = getattr(self.backbone, "num_features", hidden_dim)
+
+        self.landmark_encoder = LandmarkEncoder(in_dim=landmark_in_dim, out_dim=landmark_embed_dim, dropout=dropout)
+        self.fusion_proj = nn.Linear(visual_dim + landmark_embed_dim, hidden_dim)
+        self.fusion_norm = nn.LayerNorm(hidden_dim)
+        self.pos_embed = nn.Parameter(torch.randn(1, max_frames, hidden_dim) * 0.02)
+        self.temporal_attn = TemporalAttention(hidden_dim)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, num_classes),
+        )
+
+    def _encode_video(self, frames: torch.Tensor) -> torch.Tensor:
+        batch_size, time_steps, channels, height, width = frames.shape
+        flat = frames.reshape(batch_size * time_steps, channels, height, width)
+        encoded = self.backbone(flat)
+        return encoded.reshape(batch_size, time_steps, -1)
+
+    def forward(self, frames: torch.Tensor, landmarks: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+        if lengths is None:
+            lengths = torch.full((frames.size(0),), frames.size(1), dtype=torch.long, device=frames.device)
+
+        video_feat = self._encode_video(frames)
+        landmark_flat = landmarks.reshape(landmarks.size(0), landmarks.size(1), -1)
+        landmark_feat = self.landmark_encoder(landmark_flat)
+
+        fused = torch.cat([video_feat, landmark_feat], dim=-1)
+        fused = self.fusion_norm(self.fusion_proj(fused))
+        fused = fused + self.pos_embed[:, : fused.size(1), :]
+
+        max_seq_len = fused.size(1)
+        mask = torch.arange(max_seq_len, device=fused.device)[None, :] < lengths[:, None]
+        context, _ = self.temporal_attn(fused, mask)
+        return self.head(context)
