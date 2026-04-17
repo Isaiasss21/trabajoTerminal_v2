@@ -19,19 +19,47 @@ cap = cv2.VideoCapture(0)
 prev_time = 0
 curr_time = 0
 
-def draw_landmarks(image, detection_result):
-    """Dibuja los cuadros delimitadores y los puntos clave en la imagen."""
-    for detection in detection_result.detections:
-        # Dibujar cuadro delimitador
-        bbox = detection.bounding_box
-        start_point = bbox.origin_x, bbox.origin_y
-        end_point = bbox.origin_x + bbox.width, bbox.origin_y + bbox.height
-        cv2.rectangle(image, start_point, end_point, (0, 255, 0), 2)
+def get_most_centered_detection(detections, image_shape):
+    """Devuelve la detección cuyo centro está más cerca del centro de la imagen."""
+    if not detections:
+        return None
 
-        # Dibujar puntos clave (ojos, nariz, boca)
-        for keypoint in detection.keypoints:
-            keypoint_px = (int(keypoint.x * image.shape[1]), int(keypoint.y * image.shape[0]))
-            cv2.circle(image, keypoint_px, 2, (255, 0, 0), 2)
+    img_h, img_w = image_shape[:2]
+    image_center = np.array([img_w * 0.5, img_h * 0.5], dtype=np.float32)
+
+    best_detection = None
+    best_distance = float("inf")
+
+    for detection in detections:
+        bbox = detection.bounding_box
+        face_center = np.array(
+            [bbox.origin_x + (bbox.width * 0.5), bbox.origin_y + (bbox.height * 0.5)],
+            dtype=np.float32,
+        )
+        distance = np.linalg.norm(face_center - image_center)
+        if distance < best_distance:
+            best_distance = distance
+            best_detection = detection
+
+    return best_detection
+
+
+def draw_landmarks(image, detection_result):
+    """Dibuja solo el rostro más centrado y sus puntos clave."""
+    detection = get_most_centered_detection(detection_result.detections, image.shape)
+    if detection is None:
+        return
+
+    # Dibujar cuadro delimitador
+    bbox = detection.bounding_box
+    start_point = bbox.origin_x, bbox.origin_y
+    end_point = bbox.origin_x + bbox.width, bbox.origin_y + bbox.height
+    cv2.rectangle(image, start_point, end_point, (0, 255, 0), 2)
+
+    # Dibujar puntos clave (ojos, nariz, boca)
+    for keypoint in detection.keypoints:
+        keypoint_px = (int(keypoint.x * image.shape[1]), int(keypoint.y * image.shape[0]))
+        cv2.circle(image, keypoint_px, 2, (255, 0, 0), 2)
 
 while cap.isOpened():
     success, image = cap.read()
