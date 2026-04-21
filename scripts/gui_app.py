@@ -35,7 +35,7 @@ PREVIEW_SIZE    = (800, 600)
 SIDE_PANEL_SIZE = (204, 204)  # Tamaño de los paneles de flujo y máscara
 MAX_CAMERA_INDEX = 5
 
-# ─── Paleta de colores (tema oscuro moderno) ─────────────────────────────────
+# ─── Paleta de colores ─────────────────────────────────
 _C_BG      = "#1a1a2e"   # Fondo principal
 _C_SURFACE = "#16213e"   # Superficie de paneles
 _C_BORDER  = "#0f3460"   # Borde del recuadro de cámara
