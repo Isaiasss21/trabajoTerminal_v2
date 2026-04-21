@@ -5,6 +5,7 @@ from mediapipe.tasks.python import vision
 import numpy as np
 import time
 from collections import deque
+import tkinter as tk
 
 # ─── Configuración Global ────────────────────────────────────────────────────
 FACE_SIZE = (64, 64)           # Tamaño del tensor de entrada a la CNN
@@ -126,12 +127,27 @@ def process_optical_flow(prev_gray, curr_gray, mask):
     
     return flow_tensor, flow_visual
 
+
+def get_screen_size():
+    """Obtiene el tamaño actual de la pantalla para redimensionar la ventana."""
+    root = tk.Tk()
+    root.withdraw()
+    width = root.winfo_screenwidth()
+    height = root.winfo_screenheight()
+    root.destroy()
+    return width, height
+
 # ─── Bucle Principal ─────────────────────────────────────────────────────────
 
 cap = cv2.VideoCapture(0)
 prev_gray_face = None
 flow_buffer = deque(maxlen=SEQUENCE_LENGTH)
 prev_time = 0
+window_name = 'Microexpression Hybrid Pipeline'
+screen_width, screen_height = get_screen_size()
+
+cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(window_name, screen_width, screen_height)
 
 print("\n[INFO] Pipeline iniciado. Presiona 'q' para salir.\n")
 
@@ -191,7 +207,7 @@ while cap.isOpened():
     cv2.putText(image, f'FPS: {int(fps)}', (image.shape[1] - 150, 50), 
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    cv2.imshow('Microexpression Hybrid Pipeline', image)
+    cv2.imshow(window_name, image)
     if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 cap.release()
