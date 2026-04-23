@@ -1,3 +1,4 @@
+"train.py"
 from __future__ import annotations
 
 import json
@@ -15,7 +16,6 @@ from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils.rnn import pad_sequence
 
 from .model import EmotionLSTM
-from .model_transformer import get_sequence_model
 
 
 class NpySeqDataset(Dataset):
@@ -30,6 +30,7 @@ class NpySeqDataset(Dataset):
 
     def __getitem__(self, idx):
         x = np.load(self.feature_paths[idx]).astype(np.float32)
+        x = x.reshape(x.shape[0], -1) 
         y = int(self.labels[idx])
         if self.mean is not None and self.std is not None:
             # normalize per feature dimension
@@ -220,24 +221,19 @@ def train_lstm(
     seq_len, input_dim = x0.shape
     num_classes = len(le.classes_)
 
-    # Create model via factory so we can switch architectures easily
+    # Create model
     arch_l = arch.lower() if isinstance(arch, str) else 'lstm'
     saved_transformer_kwargs = None
+    
     if arch_l == 'lstm':
-        model = get_sequence_model('lstm', input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers, num_classes=num_classes, dropout=dropout, bidirectional=bidirectional).to(device)
-    elif arch_l == 'transformer':
-        # Prepare transformer kwargs: allow CLI to override d_model/nhead/dim_feedforward/num_layers
-        tkwargs = {} if transformer_kwargs is None else dict(transformer_kwargs)
-        # default mapping from --hidden to d_model if not provided
-        if 'd_model' not in tkwargs or tkwargs.get('d_model') is None:
-            tkwargs['d_model'] = hidden_dim
-        # default num_layers mapping
-        if 'num_layers' not in tkwargs or tkwargs.get('num_layers') is None:
-            tkwargs['num_layers'] = num_layers
-        # ensure num_classes passed
-        tkwargs['num_classes'] = num_classes
-        model = get_sequence_model('transformer', input_dim=input_dim, **tkwargs).to(device)
-        saved_transformer_kwargs = tkwargs
+        model = EmotionLSTM(
+            input_dim=input_dim, 
+            hidden_dim=hidden_dim, 
+            num_layers=num_layers, 
+            num_classes=num_classes, 
+            dropout=dropout, 
+            bidirectional=bidirectional
+        ).to(device)
     else:
         raise ValueError(f"Unknown arch: {arch}")
     
@@ -365,5 +361,337 @@ def train_lstm(
             y_true.extend(yb.numpy().tolist())
     test_acc = float(accuracy_score(y_true, y_pred)) if y_true else 0.0
     print(f"[TEST] acc={test_acc:.4f}")
+
+    return meta
+
+import torchvision.transforms as T
+
+class NpyFrameDataset(Dataset):
+    """
+    Dataset para archivos .npy con forma (T, H, W, C) — salida de extract_sequences.py.
+    Devuelve tensores (T, C, H, W) float32 normalizados [0,1] listos para ResNet.
+    """
+    IMAGENET_MEAN = [0.485, 0.456, 0.406]
+    IMAGENET_STD  = [0.229, 0.224, 0.225]
+
+    def __init__(self, feature_paths: List[str], labels: np.ndarray, img_size: int = 64):
+        self.feature_paths = feature_paths
+        self.labels = labels
+        # Normalización ImageNet estándar para ResNet18
+        self.normalize = T.Normalize(mean=self.IMAGENET_MEAN, std=self.IMAGENET_STD)
+        self.img_size = img_size
+
+    def __len__(self):
+        return len(self.feature_paths)
+
+    def __getitem__(self, idx):
+        # Cargar (T, H, W, C) float32 con valores en [−1,1] aprox (flujo óptico)
+        x = np.load(self.feature_paths[idx]).astype(np.float32)  # (T, H, W, C)
+
+        # Mover canales: (T, H, W, C) → (T, C, H, W)
+        x = torch.from_numpy(x).permute(0, 3, 1, 2)  # (T, 3, H, W)
+
+        # Escalar de [−1,1] a [0,1] para normalización ImageNet
+        x = (x + 1.0) / 2.0
+        x = torch.clamp(x, 0.0, 1.0)
+
+        # Normalización ImageNet por frame
+        x = torch.stack([self.normalize(frame) for frame in x])  # (T, 3, H, W)
+
+        y = torch.tensor(int(self.labels[idx]), dtype=torch.long)
+        return x, y
+
+
+def collate_pad_frames(batch):
+    """
+    Collate para NpyFrameDataset: rellena secuencias de longitud variable.
+
+    Returns:
+        xs_padded : (B, T_max, C, H, W) float32
+        ys        : (B,) long
+        lengths   : (B,) long
+    """
+    xs, ys = zip(*batch)
+    lengths = torch.tensor([x.shape[0] for x in xs], dtype=torch.long)
+    # Dimensiones del frame
+    _, C, H, W = xs[0].shape
+    T_max = int(lengths.max().item())
+    B = len(xs)
+
+    padded = torch.zeros(B, T_max, C, H, W, dtype=torch.float32)
+    for i, x in enumerate(xs):
+        padded[i, :x.shape[0]] = x
+
+    ys = torch.stack(ys)
+    return padded, ys, lengths
+
+
+def train_frame_lstm(
+    df_index: pd.DataFrame,
+    out_dir: str | Path,
+    epochs: int = 20,
+    batch_size: int = 8,
+    lr: float = 1e-4,
+    weight_decay: float = 1e-4,
+    frame_embedding_dim: int = 256,
+    hidden_dim: int = 128,
+    num_layers: int = 1,
+    dropout: float = 0.5,
+    seed: int = 42,
+    bidirectional: bool = True,
+    balanced_sampler: bool = False,
+    device: str | None = None,
+    patience: int = 7,
+    clip: float = 1.0,
+    use_scheduler: bool = True,
+    baseline_subtract: bool = True,
+    baseline_frames: int = 3,
+    freeze_encoder_epochs: int = 0,
+    affectnet_weights_path: str | None = None,
+):
+    """
+    Entrena EmotionFrameLSTM (ResNet18 + BiLSTM + Atención Temporal).
+
+    Parámetros clave vs train_lstm:
+      - frame_embedding_dim : dimensión del embedding por frame (salida ResNet18 → proj)
+      - freeze_encoder_epochs: épocas iniciales con ResNet18 congelado (transfer learning)
+      - affectnet_weights_path: checkpoint AffectNet/FER opcional para el encoder
+    """
+    from src.model import EmotionFrameLSTM  # import local para evitar circularidad
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = out_dir / "checkpoints"
+    ckpt_dir.mkdir(exist_ok=True)
+
+    set_seed(seed)
+
+    # ── Label encoder ──────────────────────────────────────────────────────────
+    le = LabelEncoder()
+    y  = le.fit_transform(df_index["emocion"].astype(str).tolist())
+
+    # ── Split por persona ──────────────────────────────────────────────────────
+    personas = sorted(df_index["persona"].unique().tolist())
+    n_train  = max(1, int(len(personas) * 0.67))
+    n_val    = max(1, int(len(personas) * 0.20))
+    train_p, val_p, test_p = default_person_split(personas, n_train=n_train, n_val=n_val)
+    df_tr, df_va, df_te = split_by_persona(df_index, train_p, val_p, test_p)
+
+    print(f"[INFO] Split — train: {len(df_tr)} | val: {len(df_va)} | test: {len(df_te)}")
+    print(f"[INFO] Personas train ({len(train_p)}): {train_p}")
+    print(f"[INFO] Personas val   ({len(val_p)}):   {val_p}")
+    print(f"[INFO] Personas test  ({len(test_p)}):  {test_p}")
+
+    y_tr = le.transform(df_tr["emocion"].astype(str).tolist())
+    y_va = le.transform(df_va["emocion"].astype(str).tolist())
+    y_te = le.transform(df_te["emocion"].astype(str).tolist())
+
+    # ── Datasets y DataLoaders ────────────────────────────────────────────────
+    train_ds = NpyFrameDataset(df_tr["feature_path"].tolist(), y_tr)
+    val_ds   = NpyFrameDataset(df_va["feature_path"].tolist(), y_va)
+    test_ds  = NpyFrameDataset(df_te["feature_path"].tolist(), y_te)
+
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                          drop_last=False, collate_fn=collate_pad_frames)
+    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                          drop_last=False, collate_fn=collate_pad_frames)
+    test_dl  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False,
+                          drop_last=False, collate_fn=collate_pad_frames)
+
+    # ── Balanceo de clases ────────────────────────────────────────────────────
+    counts = np.bincount(y_tr).astype(np.float32)
+    counts = np.where(counts == 0, 1.0, counts)
+
+    if balanced_sampler:
+        try:
+            from torch.utils.data import WeightedRandomSampler
+            sample_weights = (len(y_tr) / counts).astype(np.float64)[y_tr]
+            sampler = WeightedRandomSampler(
+                torch.tensor(sample_weights, dtype=torch.double),
+                num_samples=len(sample_weights), replacement=True
+            )
+            train_dl = DataLoader(train_ds, batch_size=batch_size, sampler=sampler,
+                                  drop_last=False, collate_fn=collate_pad_frames)
+            print("[INFO] Usando WeightedRandomSampler (balanced_sampler=True)")
+        except Exception as e:
+            print(f"[WARN] No se pudo activar WeightedRandomSampler: {e}")
+
+    # ── Dispositivo ───────────────────────────────────────────────────────────
+    if device is None or device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        try:
+            device = torch.device(device)
+        except Exception:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[INFO] Dispositivo: {device}")
+
+    num_classes = len(le.classes_)
+
+    # ── Modelo ────────────────────────────────────────────────────────────────
+    model = EmotionFrameLSTM(
+        frame_embedding_dim  = frame_embedding_dim,
+        hidden_dim           = hidden_dim,
+        num_layers           = num_layers,
+        num_classes          = num_classes,
+        dropout              = dropout,
+        bidirectional        = bidirectional,
+        baseline_subtract    = baseline_subtract,
+        baseline_frames      = baseline_frames,
+        imagenet_pretrained  = True,
+        affectnet_weights_path = affectnet_weights_path,
+    ).to(device)
+
+    # ── Congelar encoder (transfer learning warmup) ───────────────────────────
+    def _set_encoder_grad(requires_grad: bool):
+        for p in model.frame_encoder.parameters():
+            p.requires_grad = requires_grad
+
+    if freeze_encoder_epochs > 0:
+        _set_encoder_grad(False)
+        print(f"[INFO] ResNet18 congelado por {freeze_encoder_epochs} épocas.")
+
+    # ── Optimizador y loss ────────────────────────────────────────────────────
+    # Usar lr más bajo para el encoder pre-entrenado
+    encoder_params = list(model.frame_encoder.parameters())
+    other_params   = [p for p in model.parameters()
+                      if not any(p is ep for ep in encoder_params)]
+
+    opt = torch.optim.AdamW([
+        {"params": encoder_params, "lr": lr * 0.1},   # encoder: lr/10
+        {"params": other_params,   "lr": lr},          # LSTM + head: lr completo
+    ], weight_decay=weight_decay)
+
+    # Pesos de clase para CrossEntropy
+    num_cls = len(le.classes_)
+    if counts.shape[0] < num_cls:
+        counts = np.pad(counts, (0, num_cls - counts.shape[0]), constant_values=1.0)
+    class_weights = (len(y_tr) / counts).astype(np.float32)
+    class_weights = class_weights / np.mean(class_weights)
+    loss_fn = torch.nn.CrossEntropyLoss(
+        weight=torch.tensor(class_weights, dtype=torch.float32).to(device)
+    )
+
+    plateau_scheduler = (
+        torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3)
+        if use_scheduler else None
+    )
+
+    # ── Loop de entrenamiento ─────────────────────────────────────────────────
+    history = {"train_loss": [], "val_loss": [], "val_acc": []}
+    best_val       = -1.0
+    best_path      = ckpt_dir / "best.pt"
+    epochs_no_imp  = 0
+
+    for ep in range(1, epochs + 1):
+
+        # Descongelar encoder después de freeze_encoder_epochs
+        if freeze_encoder_epochs > 0 and ep == freeze_encoder_epochs + 1:
+            _set_encoder_grad(True)
+            print(f"[EP {ep:03d}] ResNet18 descongelado — fine-tuning completo.")
+
+        model.train()
+        tr_losses = []
+        for xb, yb, lengths in train_dl:
+            xb = xb.to(device)    # (B, T, C, H, W)
+            yb = yb.to(device)
+            opt.zero_grad()
+            logits = model.forward_packed(xb, lengths)
+            loss   = loss_fn(logits, yb)
+            loss.backward()
+            if clip and clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip)
+            opt.step()
+            tr_losses.append(float(loss.detach().cpu()))
+
+        model.eval()
+        va_losses, y_true, y_pred = [], [], []
+        with torch.no_grad():
+            for xb, yb, lengths in val_dl:
+                xb = xb.to(device)
+                yb = yb.to(device)
+                logits = model.forward_packed(xb, lengths)
+                va_losses.append(float(loss_fn(logits, yb).detach().cpu()))
+                pred = torch.argmax(logits, dim=1)
+                y_true.extend(yb.cpu().numpy().tolist())
+                y_pred.extend(pred.cpu().numpy().tolist())
+
+        tr_loss = float(np.mean(tr_losses)) if tr_losses else float("nan")
+        va_loss = float(np.mean(va_losses)) if va_losses else float("nan")
+        va_acc  = float(accuracy_score(y_true, y_pred)) if y_true else 0.0
+
+        history["train_loss"].append(tr_loss)
+        history["val_loss"].append(va_loss)
+        history["val_acc"].append(va_acc)
+
+        # Checkpoint por época
+        torch.save({
+            "model_state":    model.state_dict(),
+            "epoch":          ep,
+            "label_encoder":  le.classes_.tolist(),
+        }, ckpt_dir / f"epoch_{ep:03d}.pt")
+
+        if va_acc > best_val:
+            best_val = va_acc
+            torch.save({
+                "model_state":   model.state_dict(),
+                "label_encoder": le.classes_.tolist(),
+            }, best_path)
+            epochs_no_imp = 0
+        else:
+            epochs_no_imp += 1
+
+        if plateau_scheduler is not None:
+            plateau_scheduler.step(va_loss)
+
+        print(
+            f"[EP {ep:03d}] train={tr_loss:.4f}  val={va_loss:.4f}  "
+            f"val_acc={va_acc:.4f}  best={best_val:.4f}  no_imp={epochs_no_imp}"
+        )
+
+        if patience > 0 and epochs_no_imp >= patience:
+            print(f"[EARLY STOP] Sin mejora en {patience} épocas. Parando en época {ep}.")
+            break
+
+    # ── Evaluación final en test ──────────────────────────────────────────────
+    ckpt = torch.load(best_path, map_location=device)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for xb, yb, lengths in test_dl:
+            xb = xb.to(device)
+            logits = model.forward_packed(xb, lengths)
+            y_pred.extend(torch.argmax(logits, dim=1).cpu().numpy().tolist())
+            y_true.extend(yb.numpy().tolist())
+
+    test_acc = float(accuracy_score(y_true, y_pred)) if y_true else 0.0
+    print(f"[TEST] acc={test_acc:.4f}")
+
+    # ── Guardar metadata ──────────────────────────────────────────────────────
+    meta = {
+        "model":       "EmotionFrameLSTM",
+        "device":      str(device),
+        "classes":     le.classes_.tolist(),
+        "personas":    personas,
+        "split":       {"train": train_p, "val": val_p, "test": test_p},
+        "best_checkpoint": str(best_path),
+        "test_acc":    test_acc,
+        "history":     history,
+        "balanced_sampler": bool(balanced_sampler),
+        "hparams": {
+            "frame_embedding_dim": frame_embedding_dim,
+            "hidden_dim":          hidden_dim,
+            "num_layers":          num_layers,
+            "dropout":             dropout,
+            "bidirectional":       bidirectional,
+            "baseline_subtract":   baseline_subtract,
+            "baseline_frames":     baseline_frames,
+            "freeze_encoder_epochs": freeze_encoder_epochs,
+        },
+    }
+    (out_dir / "train_meta.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     return meta
