@@ -401,6 +401,10 @@ class InferenceEngine:
         return self._model is not None
 
     @property
+    def model_path(self) -> Path:
+        return self._model_path
+
+    @property
     def label_map(self) -> dict[str, int]:
         return dict(self._label_map)
 
@@ -488,10 +492,25 @@ class InferenceEngine:
         self._model = model.to(self._device)
 
         # ── Label map ────────────────────────────────────────────────────────
-        if num_classes == len(DEFAULT_LABEL_MAP):
+        # 1) Companion JSON file  (<model_name>.json  next to the .pth)
+        json_path = self._model_path.with_suffix(".json")
+        loaded_map: dict[str, int] | None = None
+        if json_path.exists():
+            import json
+            try:
+                raw = json.loads(json_path.read_text(encoding="utf-8"))
+                candidate = raw.get("label_map", raw) if isinstance(raw, dict) else None
+                if isinstance(candidate, dict) and len(candidate) == num_classes:
+                    loaded_map = {str(k): int(v) for k, v in candidate.items()}
+            except Exception:
+                pass
+
+        if loaded_map is not None:
+            self._label_map = loaded_map
+        elif num_classes == len(DEFAULT_LABEL_MAP):
             self._label_map = DEFAULT_LABEL_MAP.copy()
         else:
-            # Mapa genérico para modelos con distinto nº de clases
+            # Generic fallback for unknown num_classes
             self._label_map = {f"clase_{i}": i for i in range(num_classes)}
         self._idx_map = {v: k for k, v in self._label_map.items()}
 

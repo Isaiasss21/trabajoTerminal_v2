@@ -143,8 +143,7 @@ class SettingsScreen(QWidget):
         self._model_path_edit.setReadOnly(True)
         self._model_path_edit.setPlaceholderText("Ningún modelo cargado")
         if self._engine.is_ready:
-            # Si el engine ya tiene un modelo, mostrar su ruta (puede no ser accesible)
-            self._model_path_edit.setText("Modelo cargado (ruta desconocida)")
+            self._model_path_edit.setText(str(self._engine.model_path))
         vbox.addWidget(self._model_path_edit)
 
         btn_row = QHBoxLayout()
@@ -244,9 +243,12 @@ class SettingsScreen(QWidget):
 
     @pyqtSlot()
     def _browse_model(self) -> None:
+        # Empezar en la carpeta models/ del proyecto si existe, si no en home
+        _models_dir = Path(__file__).resolve().parent.parent.parent / "models"
+        start_dir = str(_models_dir) if _models_dir.is_dir() else str(Path.home())
         path, _ = QFileDialog.getOpenFileName(
             self, "Seleccionar checkpoint (.pth)",
-            str(Path.home()),
+            start_dir,
             "Checkpoint PyTorch (*.pth *.pt)",
         )
         if path:
