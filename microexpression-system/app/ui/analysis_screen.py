@@ -1,38 +1,40 @@
 """
 analysis_screen.py
 ------------------
-Pantalla de análisis en tiempo real.
+Pantalla de análisis de video pre-grabado.
 
 Layout:
-  ┌───────────────────────────────────────────────────┐
-  │  [▶ Iniciar]  [■ Detener]   ● Cara detectada     │  ← barra superior
-  ├─────────────────────────┬─────────────────────────┤
-  │                         │  Emoción:  Alegría      │
-  │   Feed de cámara        │  Confianza: 87%         │
-  │   (QLabel, JPEG)        │  ─────────────────────  │
-  │                         │  Distribución de probs  │
-  │                         │  (barras simples)       │
-  └─────────────────────────┴─────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────┐
+  │  [📂 Seleccionar video]  nombre_video.mp4   [▶ Analizar]    │  ← barra superior
+  ├─────────────────────────┬────────────────────────────────────┤
+  │                         │  Emoción:   Alegría                │
+  │   Preview del frame     │  Confianza: 87%                    │
+  │   en proceso            │  ──────────────────────────────    │
+  │                         │  Distribución de probabilidades    │
+  │                         │  (barras simples)                  │
+  ├─────────────────────────┴────────────────────────────────────┤
+  │  ████████████░░░░░░░  Frame 120 / 450   Secuencias: 8        │  ← progreso
+  └──────────────────────────────────────────────────────────────┘
 
 Señales emitidas al exterior:
-  session_finished(str) — session_id al cerrar sesión
+  session_finished(str) — session_id al finalizar el análisis
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
-import numpy as np
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QFont, QColor
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QSizePolicy, QProgressBar, QScrollArea,
+    QFrame, QSizePolicy, QProgressBar, QFileDialog,
 )
 
 from app.inference.inference_engine import InferenceEngine, InferenceResult, EMOTION_COLORS
-from app.inference.camera_pipeline import CameraPipeline
+from app.inference.video_pipeline import VideoPipeline
 from app.storage.session_manager import SessionManager, Prediction, Session
 
 
@@ -47,13 +49,14 @@ _RED     = "#F44336"
 _TEXT    = "#E0E0E0"
 _SUBTEXT = "#9E9E9E"
 
-_BTN_START = f"QPushButton {{ background:{_GREEN}; color:#fff; border:none; border-radius:6px; padding:8px 20px; font-size:13px; }} QPushButton:hover {{ background:#66BB6A; }}"
-_BTN_STOP  = f"QPushButton {{ background:{_RED}; color:#fff; border:none; border-radius:6px; padding:8px 20px; font-size:13px; }} QPushButton:hover {{ background:#EF5350; }}"
-_BTN_DIS   = f"QPushButton {{ background:#424242; color:#757575; border:none; border-radius:6px; padding:8px 20px; font-size:13px; }}"
+_BTN_SELECT  = f"QPushButton {{ background:#333; color:{_TEXT}; border:none; border-radius:6px; padding:8px 16px; font-size:13px; }} QPushButton:hover {{ background:#444; }}"
+_BTN_ANALYZE = f"QPushButton {{ background:{_GREEN}; color:#fff; border:none; border-radius:6px; padding:8px 20px; font-size:13px; }} QPushButton:hover {{ background:#66BB6A; }}"
+_BTN_STOP    = f"QPushButton {{ background:{_RED}; color:#fff; border:none; border-radius:6px; padding:8px 20px; font-size:13px; }} QPushButton:hover {{ background:#EF5350; }}"
+_BTN_DIS     = f"QPushButton {{ background:#424242; color:#757575; border:none; border-radius:6px; padding:8px 20px; font-size:13px; }}"
 
 
 class AnalysisScreen(QWidget):
-    """Pantalla de análisis en tiempo real con cámara."""
+    """Pantalla de análisis de video pre-grabado."""
 
     session_finished = pyqtSignal(str)  # session_id
 
@@ -66,12 +69,10 @@ class AnalysisScreen(QWidget):
         super().__init__(parent)
         self._engine          = engine
         self._session_manager = session_manager
-        self._pipeline:       Optional[CameraPipeline] = None
-        self._session:        Optional[Session]         = None
-        self._last_result:    Optional[InferenceResult] = None
-        self._frame_count:    int  = 0
+        self._pipeline:       Optional[VideoPipeline]   = None
+        self._session:        Optional[Session]          = None
+        self._video_path:     Optional[Path]             = None
         self._running:        bool = False
-        self._inferring:      bool = False  # guard: evita inferencias en cascada
 
         self._build_ui()
 
@@ -81,12 +82,8 @@ class AnalysisScreen(QWidget):
         """Actualiza el motor de inferencia (llamado desde MainWindow al cambiar modelo)."""
         self._engine = engine
 
-    def set_camera_index(self, index: int) -> None:
-        """Actualiza el índice de cámara a usar en la siguiente sesión."""
-        self._preferred_camera_index: int = index
-
     def stop_capture(self) -> None:
-        """Detiene la captura limpiamente (llamado al cerrar la ventana)."""
+        """Detiene el pipeline limpiamente (llamado al cerrar la ventana)."""
         if self._pipeline and self._pipeline.isRunning():
             self._pipeline.stop()
 
@@ -98,59 +95,82 @@ class AnalysisScreen(QWidget):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
-        # ── Barra superior de controles ───────────────────────────────────
+        # ── Barra superior: selección de video + botók analizar ───────────
         ctrl_bar = QHBoxLayout()
-        ctrl_bar.setSpacing(12)
+        ctrl_bar.setSpacing(10)
 
-        self._btn_start = QPushButton("▶  Iniciar")
-        self._btn_start.setStyleSheet(_BTN_START)
-        self._btn_start.setFixedHeight(38)
-        self._btn_start.clicked.connect(self._start_session)
-        ctrl_bar.addWidget(self._btn_start)
+        self._btn_select = QPushButton("📂  Seleccionar video")
+        self._btn_select.setStyleSheet(_BTN_SELECT)
+        self._btn_select.setFixedHeight(38)
+        self._btn_select.clicked.connect(self._select_video)
+        ctrl_bar.addWidget(self._btn_select)
 
-        self._btn_stop = QPushButton("■  Detener")
+        self._lbl_video_path = QLabel("Ningún video seleccionado")
+        self._lbl_video_path.setStyleSheet(f"color: {_SUBTEXT}; font-size: 12px;")
+        self._lbl_video_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        ctrl_bar.addWidget(self._lbl_video_path, stretch=1)
+
+        self._lbl_seq_count = QLabel("Secuencias: 0")
+        self._lbl_seq_count.setStyleSheet(f"color: {_SUBTEXT}; font-size: 12px;")
+        ctrl_bar.addWidget(self._lbl_seq_count)
+
+        self._btn_analyze = QPushButton("▶  Analizar")
+        self._btn_analyze.setStyleSheet(_BTN_DIS)
+        self._btn_analyze.setFixedHeight(38)
+        self._btn_analyze.setEnabled(False)
+        self._btn_analyze.clicked.connect(self._start_analysis)
+        ctrl_bar.addWidget(self._btn_analyze)
+
+        self._btn_stop = QPushButton("■  Cancelar")
         self._btn_stop.setStyleSheet(_BTN_DIS)
         self._btn_stop.setFixedHeight(38)
         self._btn_stop.setEnabled(False)
-        self._btn_stop.clicked.connect(self._stop_session)
+        self._btn_stop.clicked.connect(self._cancel_analysis)
         ctrl_bar.addWidget(self._btn_stop)
-
-        ctrl_bar.addStretch()
-
-        self._lbl_face_status = QLabel("⬤  Sin cara")
-        self._lbl_face_status.setStyleSheet(f"color: {_SUBTEXT}; font-size: 13px;")
-        ctrl_bar.addWidget(self._lbl_face_status)
-
-        self._lbl_pred_count = QLabel("Predicciones: 0")
-        self._lbl_pred_count.setStyleSheet(f"color: {_SUBTEXT}; font-size: 12px;")
-        ctrl_bar.addWidget(self._lbl_pred_count)
 
         root.addLayout(ctrl_bar)
 
         # ── Separador ─────────────────────────────────────────────────────
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: #2A2A2A;")
+        sep.setStyleSheet("color: #2A2A2A;")
         root.addWidget(sep)
 
-        # ── Área principal: video + panel de emoción ──────────────────────
+        # ── Área principal: preview + panel de emoción ────────────────────
         main_row = QHBoxLayout()
         main_row.setSpacing(16)
 
-        # Feed de cámara
+        # Preview del frame en procesamiento
         self._video_label = QLabel()
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._video_label.setStyleSheet(f"background: #000; border-radius: 8px;")
+        self._video_label.setStyleSheet("background: #000; border-radius: 8px; color: #555; font-size: 14px;")
         self._video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._video_label.setMinimumSize(480, 360)
-        self._video_label.setText("Sin señal de cámara")
+        self._video_label.setMinimumSize(480, 340)
+        self._video_label.setText("Selecciona un video para comenzar")
         main_row.addWidget(self._video_label, stretch=3)
 
-        # Panel lateral de resultados
+        # Panel lateral de última predicción
         panel = self._build_result_panel()
         main_row.addWidget(panel, stretch=2)
 
         root.addLayout(main_row)
+
+        # ── Barra de progreso ─────────────────────────────────────────────
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFixedHeight(14)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setStyleSheet(f"""
+            QProgressBar {{ background: #252525; border-radius: 7px; }}
+            QProgressBar::chunk {{ background: {_ACCENT}; border-radius: 7px; }}
+        """)
+        self._progress_bar.setVisible(False)
+        root.addWidget(self._progress_bar)
+
+        self._lbl_status = QLabel("")
+        self._lbl_status.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px;")
+        root.addWidget(self._lbl_status)
 
     def _build_result_panel(self) -> QWidget:
         panel = QFrame()
@@ -161,15 +181,12 @@ class AnalysisScreen(QWidget):
         vbox.setContentsMargins(16, 16, 16, 16)
         vbox.setSpacing(8)
 
-        # Etiqueta "Emoción detectada"
-        lbl_title = QLabel("Emoción detectada")
+        lbl_title = QLabel("Última predicción")
         lbl_title.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px; font-weight: bold;")
-        lbl_title.setAlignment(Qt.AlignmentFlag.AlignLeft)
         vbox.addWidget(lbl_title)
 
         self._lbl_emotion = QLabel("–")
         self._lbl_emotion.setStyleSheet(f"color: {_TEXT}; font-size: 28px; font-weight: bold;")
-        self._lbl_emotion.setAlignment(Qt.AlignmentFlag.AlignLeft)
         vbox.addWidget(self._lbl_emotion)
 
         self._lbl_confidence = QLabel("Confianza: –")
@@ -177,15 +194,14 @@ class AnalysisScreen(QWidget):
         vbox.addWidget(self._lbl_confidence)
 
         self._lbl_validity = QLabel("")
-        self._lbl_validity.setStyleSheet(f"font-size: 12px;")
+        self._lbl_validity.setStyleSheet("font-size: 12px;")
         vbox.addWidget(self._lbl_validity)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: #333;")
-        vbox.addWidget(sep)
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color: #333;")
+        vbox.addWidget(sep2)
 
-        # Barras de probabilidad por emoción
         lbl_dist = QLabel("Distribución")
         lbl_dist.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px; font-weight: bold;")
         vbox.addWidget(lbl_dist)
@@ -216,64 +232,74 @@ class AnalysisScreen(QWidget):
         vbox.addStretch()
         return panel
 
-    # ── Inicio / detención de sesión ──────────────────────────────────────
+    # ── Selección de video ────────────────────────────────────────────────
 
-    def _start_session(self) -> None:
-        if self._running:
+    @pyqtSlot()
+    def _select_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar video",
+            str(Path.home()),
+            "Videos (*.mp4 *.avi *.mov *.mkv *.wmv *.MP4 *.AVI);;Todos los archivos (*)",
+        )
+        if path:
+            self._video_path = Path(path)
+            self._lbl_video_path.setText(self._video_path.name)
+            self._btn_analyze.setEnabled(True)
+            self._btn_analyze.setStyleSheet(_BTN_ANALYZE)
+            self._video_label.setText(f"Video listo: {self._video_path.name}\nPresiona ▶ Analizar para comenzar")
+            self._lbl_status.setText("")
+            self._progress_bar.setValue(0)
+            self._progress_bar.setVisible(False)
+
+    # ── Análisis ──────────────────────────────────────────────────────────
+
+    @pyqtSlot()
+    def _start_analysis(self) -> None:
+        if self._running or not self._video_path or not self._engine.is_ready:
+            if not self._engine.is_ready:
+                self._lbl_status.setText("⚠ El modelo no está cargado. Ve a Ajustes para cargarlo.")
             return
+
         self._running = True
         self._session = self._session_manager.new_session()
+        self._lbl_seq_count.setText("Secuencias: 0")
 
-        from app.inference.camera_pipeline import get_available_cameras
-        preferred = getattr(self, "_preferred_camera_index", None)
-        if preferred is not None:
-            cam_idx = preferred
-        else:
-            cameras = get_available_cameras()
-            cam_idx = cameras[0] if cameras else 0
-        self._pipeline = CameraPipeline(camera_index=cam_idx)
+        self._pipeline = VideoPipeline(self._video_path, self._engine)
         self._pipeline.frame_ready.connect(self._on_frame)
-        self._pipeline.sequence_ready.connect(self._on_sequence)
-        self._pipeline.landmark_status.connect(self._on_landmark_status)
+        self._pipeline.progress.connect(self._on_progress)
+        self._pipeline.sequence_result.connect(self._on_sequence_result)
+        self._pipeline.finished_processing.connect(self._on_finished)
         self._pipeline.error.connect(self._on_pipeline_error)
         self._pipeline.start()
 
-        self._btn_start.setEnabled(False)
-        self._btn_start.setStyleSheet(_BTN_DIS)
+        self._btn_select.setEnabled(False)
+        self._btn_analyze.setEnabled(False)
+        self._btn_analyze.setStyleSheet(_BTN_DIS)
         self._btn_stop.setEnabled(True)
         self._btn_stop.setStyleSheet(_BTN_STOP)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+        self._lbl_status.setText("Iniciando análisis…")
 
-    def _stop_session(self) -> None:
+    @pyqtSlot()
+    def _cancel_analysis(self) -> None:
         if not self._running:
             return
         self._running = False
-
         if self._pipeline:
             self._pipeline.stop()
             self._pipeline = None
-
-        session_id = ""
         if self._session:
-            meta = self._session.close()
-            session_id = meta.session_id
+            self._session.close()
             self._session = None
-
-        self._btn_start.setEnabled(True)
-        self._btn_start.setStyleSheet(_BTN_START)
-        self._btn_stop.setEnabled(False)
-        self._btn_stop.setStyleSheet(_BTN_DIS)
-        self._video_label.setText("Sin señal de cámara")
-        self._lbl_face_status.setText("⬤  Sin cara")
-        self._lbl_pred_count.setText("Predicciones: 0")
-        self._reset_result_panel()
-
-        if session_id:
-            self.session_finished.emit(session_id)
+        self._reset_controls()
+        self._lbl_status.setText("Análisis cancelado.")
 
     # ── Slots del pipeline ────────────────────────────────────────────────
 
+    @pyqtSlot(bytes)
     def _on_frame(self, jpeg_bytes: bytes) -> None:
-        """Actualiza el QLabel con el frame JPEG recibido."""
         image = QImage.fromData(jpeg_bytes, "JPEG")
         if image.isNull():
             return
@@ -285,23 +311,14 @@ class AnalysisScreen(QWidget):
         )
         self._video_label.setPixmap(scaled)
 
-    def _on_sequence(self, flow_sequence: np.ndarray) -> None:
-        """Recibe una secuencia de flujo, ejecuta inferencia y actualiza UI."""
-        if not self._running or not self._engine.is_ready:
-            return
-        # Si ya hay una inferencia en curso, descartar esta secuencia para no
-        # bloquear el event loop de Qt (cada pasada ResNet18 en CPU ~1-2 s).
-        if self._inferring:
-            return
-        self._inferring = True
-        try:
-            result = self._engine.predict(flow_sequence)
-        except Exception:
-            return
-        finally:
-            self._inferring = False
+    @pyqtSlot(int, int)
+    def _on_progress(self, current: int, total: int) -> None:
+        if total > 0:
+            self._progress_bar.setValue(int(current * 100 / total))
+            self._lbl_status.setText(f"Procesando frame {current} / {total}")
 
-        self._last_result = result
+    @pyqtSlot(object)
+    def _on_sequence_result(self, result: InferenceResult) -> None:
         self._update_result_panel(result)
 
         if self._session:
@@ -311,25 +328,46 @@ class AnalysisScreen(QWidget):
                 raw_label          = result.raw_label,
                 confidence         = result.confidence,
                 is_valid           = result.is_valid,
-                duration_ms        = 200,   # aproximado (SEQUENCE_LENGTH * ~13ms/frame)
+                duration_ms        = 500,
                 landmarks_detected = True,
             )
             self._session.add_prediction(pred)
-            self._lbl_pred_count.setText(f"Predicciones: {self._session.prediction_count}")
+            self._lbl_seq_count.setText(f"Secuencias: {self._session.prediction_count}")
 
-    def _on_landmark_status(self, detected: bool) -> None:
-        if detected:
-            self._lbl_face_status.setText("⬤  Cara detectada")
-            self._lbl_face_status.setStyleSheet(f"color: {_GREEN}; font-size: 13px;")
-        else:
-            self._lbl_face_status.setText("⬤  Sin cara")
-            self._lbl_face_status.setStyleSheet(f"color: {_SUBTEXT}; font-size: 13px;")
+    @pyqtSlot(int)
+    def _on_finished(self, seq_count: int) -> None:
+        self._running = False
+        self._progress_bar.setValue(100)
+        self._lbl_status.setText(
+            f"✔ Análisis completado — {seq_count} secuencias procesadas"
+        )
+        self._lbl_status.setStyleSheet(f"color: {_GREEN}; font-size: 11px;")
 
+        session_id = ""
+        if self._session:
+            meta = self._session.close()
+            session_id = meta.session_id
+            self._session = None
+
+        self._reset_controls()
+
+        if session_id and seq_count > 0:
+            self.session_finished.emit(session_id)
+
+    @pyqtSlot(str)
     def _on_pipeline_error(self, msg: str) -> None:
-        self._lbl_face_status.setText(f"⚠ {msg[:60]}")
-        self._lbl_face_status.setStyleSheet(f"color: {_AMBER}; font-size: 12px;")
+        self._lbl_status.setText(f"⚠ {msg[:80]}")
+        self._lbl_status.setStyleSheet(f"color: {_AMBER}; font-size: 11px;")
 
-    # ── Actualización del panel de resultados ─────────────────────────────
+    # ── Helpers de UI ─────────────────────────────────────────────────────
+
+    def _reset_controls(self) -> None:
+        self._btn_select.setEnabled(True)
+        self._btn_analyze.setEnabled(self._video_path is not None)
+        if self._video_path:
+            self._btn_analyze.setStyleSheet(_BTN_ANALYZE)
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.setStyleSheet(_BTN_DIS)
 
     def _update_result_panel(self, result: InferenceResult) -> None:
         color = EMOTION_COLORS.get(result.emotion, _TEXT)
@@ -351,10 +389,3 @@ class AnalysisScreen(QWidget):
             prob = result.probs.get(emo_es, 0.0)
             bar.setValue(int(prob * 100))
 
-    def _reset_result_panel(self) -> None:
-        self._lbl_emotion.setText("–")
-        self._lbl_emotion.setStyleSheet(f"color: {_TEXT}; font-size: 28px; font-weight: bold;")
-        self._lbl_confidence.setText("Confianza: –")
-        self._lbl_validity.setText("")
-        for _, (_, bar) in self._prob_bars.items():
-            bar.setValue(0)

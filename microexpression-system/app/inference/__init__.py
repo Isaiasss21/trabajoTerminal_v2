@@ -7,6 +7,7 @@ from .inference_engine import (
     CONFIDENCE_VALID,
     CONFIDENCE_UNCERTAIN,
 )
+from .video_pipeline import VideoPipeline
 
 __all__ = [
     "InferenceEngine",
@@ -16,4 +17,5 @@ __all__ = [
     "EMOTION_COLORS",
     "CONFIDENCE_VALID",
     "CONFIDENCE_UNCERTAIN",
+    "VideoPipeline",
 ]

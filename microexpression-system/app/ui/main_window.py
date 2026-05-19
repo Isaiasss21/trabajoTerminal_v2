@@ -218,8 +218,6 @@ class MainWindow(QMainWindow):
         self._history_screen.view_session_requested.connect(self._on_view_session_from_history)
         # Actualizar motor desde ajustes
         self._settings_screen.model_changed.connect(self._on_model_changed)
-        # Propagar selección de cámara desde ajustes
-        self._settings_screen._camera_combo.currentIndexChanged.connect(self._on_camera_changed)
 
     # ── Navegación ────────────────────────────────────────────────────────
 
@@ -240,10 +238,6 @@ class MainWindow(QMainWindow):
         """Navega a la pantalla de resultados mostrando la sesión seleccionada."""
         self._results_screen.load_session(session_id)
         self._navigate(1)  # pantalla Resultados
-
-    def _on_camera_changed(self) -> None:
-        idx = self._settings_screen.selected_camera_index
-        self._analysis_screen.set_camera_index(idx)
 
     def _on_model_changed(self, model_path: str) -> None:
         """Recarga el motor con la nueva ruta de modelo."""
