@@ -13,8 +13,8 @@ Pipeline per sample:
 
 Run example:
   python scripts/train_mobilenet_flow.py \
-      --data_dir   D:/datasetVideosTT/extracted_flow      \
-      --csv_index  outputs_dataset_index/extraction_index.csv \
+      --data_dir   output_extraction_meme_v2                \
+      --csv_index  output_extraction_meme_v2/extraction_index.csv \
       --epochs     30                                     \
       --batch_size 16
 """
@@ -54,8 +54,8 @@ def set_seed(seed: int = 42) -> None:
 
 class Config:
     # Data
-    data_dir:   str       = "D:/datasetVideosTT/extracted_flow"
-    csv_index:  str | None = "outputs_dataset_index/extraction_index.csv"
+    data_dir:   str       = "output_extraction_meme_v2"
+    csv_index:  str | None = "output_extraction_meme_v2/extraction_index.csv"
     onset_csv:  str | None = None        # optional CSV with onset/offset columns
 
     # Frame sampling
@@ -93,8 +93,8 @@ EMOTION_TO_IDX: dict[str, int] = {
     "asco":      2,
     "repression":3, "rep": 3,
     "represion": 3, "represión": 3,
-    "others":    4, "oth": 4,
-    "neutral":   4, "otros": 4,
+    "others":    4, "oth": 4, "otros": 4,
+    "neutral":   5,
     "sadness":   5, "sad": 5,
     "tristeza":  5,
     "fear":      6, "fea": 6,

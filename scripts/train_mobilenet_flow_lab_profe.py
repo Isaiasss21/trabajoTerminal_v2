@@ -19,9 +19,8 @@ from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 ROOT_DIR = Path("../")
 
 
-DATA_DIR = ROOT_DIR / 'extracted_flow'
-'''CSV_PATH = ROOT_DIR / 'outputs_dataset_index' / 'extraction_index.csv'''
-CSV_PATH = ROOT_DIR / 'extracted_flow' / 'extraction_index_newMemeUni.csv'
+DATA_DIR = ROOT_DIR / 'output_extraction_meme_v2'
+CSV_PATH = ROOT_DIR / 'output_extraction_meme_v2' / 'extraction_index.csv'
 
 OUTPUT_DIR = ROOT_DIR / 'Mobile' / 'outputs'
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,9 +59,11 @@ EMOTION_TO_IDX = {
     'surprise': 1, 'sorpresa': 1,
     'disgust': 2, 'asco': 2,
     'repression': 3,
-    'others': 4, 'neutral': 4,
-    'sadness': 5, 'tristeza': 5,
-    'fear': 6, 'miedo': 6,
+    'others': 4, 'otros': 4,
+    'neutral': 5,
+    'sadness': 6, 'tristeza': 6,
+    'fear': 7, 'miedo': 7,
+    'anger': 8, 'enojo': 8,
 }
 
 class FlowDataset(Dataset):
