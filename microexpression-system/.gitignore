@@ -1,0 +1,33 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Datos generados en runtime
+data/sessions/
+data/exports/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Modelos entrenados (archivos grandes)
+*.pth
+*.ckpt
+*.pt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
