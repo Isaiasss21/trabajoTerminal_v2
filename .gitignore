@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.Python
+.pt
+.pth
+
+.npy
+outputs/
+outputs_dataset_index/
+sequences/prueba/

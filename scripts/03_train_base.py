@@ -1,121 +1,172 @@
+"""
+03_train_base.py  —  EmotionFrameLSTM con ResNet18 CONGELADO permanentemente.
+
+Cambio clave vs versión anterior:
+  freeze_encoder_epochs = 999  →  el ResNet18 nunca se desbloquea.
+  Solo entrenan: LSTM + cabeza de clasificación.
+
+Uso:
+    python scripts/03_train_base.py
+    python scripts/03_train_base.py --epochs 50 --dropout 0.6 --hidden_dim 64
+"""
+
+from __future__ import annotations
+
 import argparse
-import json
-import random
-from pathlib import Path
 import sys
+from pathlib import Path
 
-import numpy as np
-import torch
-from sklearn.metrics import accuracy_score, classification_report, f1_score
-from sklearn.preprocessing import LabelEncoder
-from torch.utils.data import DataLoader, WeightedRandomSampler
+import pandas as pd
 
-root_path = Path(__file__).resolve().parent.parent
-sys.path.append(str(root_path))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.dataio import load_feature_index
-from src.model import EmotionLSTM
-from src.train import NpySeqDataset, collate_pad, compute_mean_std, default_person_split, split_by_persona
+from src.train import train_frame_lstm  # noqa: E402
+
+
+DEFAULTS = {
+    "csv":        PROJECT_ROOT / "outputs_dataset_index" / "extraction_index.csv",
+    "output_dir": PROJECT_ROOT / "outputs" / "run_frozen",
+
+    # Modelo — reducido para evitar overfitting con ~190 muestras
+    "frame_embedding_dim": 256,
+    "hidden_dim":          64,    # ← bajado de 128
+    "num_layers":          1,
+    "dropout":             0.6,   # ← subido de 0.5
+    "bidirectional":       True,
+    "baseline_subtract":   True,
+    "baseline_frames":     3,
+
+    # Entrenamiento
+    "epochs":               60,
+    "batch_size":           8,
+    "lr":                   5e-4,
+    "weight_decay":         1e-3,  # ← más regularización
+    "patience":             12,
+    "clip":                 1.0,
+    "seed":                 42,
+
+    # CLAVE: ResNet18 nunca se descongela
+    "freeze_encoder_epochs": 999,
+
+    "balanced_sampler": True,
+    "use_scheduler":    True,
+    "device":           "auto",
+    "min_frames":       5,
+}
+
+
+def load_and_adapt_csv(csv_path: Path, npy_root: Path, min_frames: int = 1) -> pd.DataFrame:
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV no encontrado: {csv_path}")
+    df = pd.read_csv(csv_path)
+    missing = {"persona", "emocion", "archivo"} - set(df.columns)
+    if missing:
+        raise ValueError(f"Columnas faltantes: {missing}")
+    df["feature_path"] = df["archivo"].apply(
+        lambda rel: str((npy_root / Path(rel.replace("\\", "/"))).resolve())
+    )
+    if "num_frames" in df.columns and min_frames > 1:
+        antes = len(df)
+        df = df[df["num_frames"] >= min_frames].reset_index(drop=True)
+        if (d := antes - len(df)) > 0:
+            print(f"[INFO] {d} secuencias descartadas por < {min_frames} frames.")
+    existe = df["feature_path"].apply(lambda p: Path(p).exists())
+    if (f := (~existe).sum()) > 0:
+        print(f"[WARN] {f} archivos .npy no encontrados. Se omitirán.")
+        df = df[existe].reset_index(drop=True)
+    if len(df) == 0:
+        raise RuntimeError("No quedaron secuencias válidas.")
+    return df[["persona", "emocion", "feature_path"]].copy()
+
+
+def print_summary(df: pd.DataFrame) -> None:
+    print("\n" + "═" * 55)
+    print("  DATASET")
+    print("═" * 55)
+    print(f"  Total: {len(df)}  |  Personas: {df['persona'].nunique()}  |  Clases: {df['emocion'].nunique()}")
+    dist = df["emocion"].value_counts()
+    for em, c in dist.items():
+        bar = "█" * max(1, c * 20 // dist.max())
+        print(f"    {em:<20} {c:>4}  {bar}")
+    print("═" * 55 + "\n")
+
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train Base BiLSTM on ResNet embeddings")
-    p.add_argument("--features_index", required=True, help="CSV maestro")
-    p.add_argument("--out_dir", default="outputs/exp_base", help="Output folder")
-    p.add_argument("--epochs", type=int, default=35)
-    p.add_argument("--batch", type=int, default=8)
-    p.add_argument("--lr", type=float, default=5e-4)
-    p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--csv",        type=Path, default=DEFAULTS["csv"])
+    p.add_argument("--output_dir", type=Path, default=DEFAULTS["output_dir"])
+    p.add_argument("--frame_embedding_dim", type=int,   default=DEFAULTS["frame_embedding_dim"])
+    p.add_argument("--hidden_dim",          type=int,   default=DEFAULTS["hidden_dim"])
+    p.add_argument("--num_layers",          type=int,   default=DEFAULTS["num_layers"])
+    p.add_argument("--dropout",             type=float, default=DEFAULTS["dropout"])
+    p.add_argument("--epochs",              type=int,   default=DEFAULTS["epochs"])
+    p.add_argument("--batch_size",          type=int,   default=DEFAULTS["batch_size"])
+    p.add_argument("--lr",                  type=float, default=DEFAULTS["lr"])
+    p.add_argument("--weight_decay",        type=float, default=DEFAULTS["weight_decay"])
+    p.add_argument("--patience",            type=int,   default=DEFAULTS["patience"])
+    p.add_argument("--seed",                type=int,   default=DEFAULTS["seed"])
+    p.add_argument("--device",              type=str,   default=DEFAULTS["device"])
+    p.add_argument("--min_frames",          type=int,   default=DEFAULTS["min_frames"])
+    p.add_argument("--freeze_encoder_epochs", type=int, default=DEFAULTS["freeze_encoder_epochs"],
+                   help="999 = nunca descongelar (recomendado con dataset pequeño)")
+    p.add_argument("--no_balanced_sampler", dest="balanced_sampler",
+                   action="store_false", default=DEFAULTS["balanced_sampler"])
+    p.add_argument("--affectnet_weights_path", type=str, default=None)
     return p.parse_args()
 
-def agrupar_emociones(emocion_original: str) -> str:
-    emocion = str(emocion_original).strip().lower()
-    if emocion in ['felicidad', 'positive', 'happiness']: return 'Positivo'
-    elif emocion in ['asco', 'tristeza', 'miedo', 'enojo', 'negativo', 'negative', 'disgust', 'sadness', 'fear', 'anger']: return 'Negativo'
-    elif emocion in ['sorpresa', 'surprise']: return 'Sorpresa'
-    elif emocion in ['neutral', 'non_micro']: return 'Neutral'
-    else: return 'Desconocida'
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
 def main() -> None:
     args = parse_args()
-    set_seed(42)
-    device = torch.device("cpu") # Forzado por incompatibilidad de RTX 5050
-    print(f"[INFO] Device: {device}")
+    csv_path = args.csv.resolve()
+    npy_root = csv_path.parent
 
-    out_dir = Path(args.out_dir)
-    ckpt_dir = out_dir / "checkpoints"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\n[INFO] Modelo  : EmotionFrameLSTM — ResNet18 CONGELADO + BiLSTM + Atención")
+    print(f"[INFO] Salida  : {args.output_dir}")
+    print(f"[INFO] Freeze  : {args.freeze_encoder_epochs} épocas (999 = permanente)")
+    print(f"[INFO] hidden  : {args.hidden_dim}  dropout: {args.dropout}  lr: {args.lr}")
 
-    df = load_feature_index(args.features_index)
-    df["emocion"] = df["emocion"].apply(agrupar_emociones)
-    df = df[df["emocion"] != "Desconocida"].copy()
+    df = load_and_adapt_csv(csv_path, npy_root, min_frames=args.min_frames)
+    print_summary(df)
 
-    le = LabelEncoder()
-    _ = le.fit_transform(df["emocion"].astype(str).tolist())
-    classes = le.classes_.tolist()
+    meta = train_frame_lstm(
+        df_index              = df,
+        out_dir               = args.output_dir,
+        epochs                = args.epochs,
+        batch_size            = args.batch_size,
+        lr                    = args.lr,
+        weight_decay          = args.weight_decay,
+        frame_embedding_dim   = args.frame_embedding_dim,
+        hidden_dim            = args.hidden_dim,
+        num_layers            = args.num_layers,
+        dropout               = args.dropout,
+        seed                  = args.seed,
+        bidirectional         = True,
+        balanced_sampler      = args.balanced_sampler,
+        device                = args.device,
+        patience              = args.patience,
+        clip                  = 1.0,
+        use_scheduler         = True,
+        baseline_subtract     = True,
+        baseline_frames       = 3,
+        freeze_encoder_epochs = args.freeze_encoder_epochs,
+        affectnet_weights_path= args.affectnet_weights_path,
+    )
 
-    personas = sorted(df["persona"].unique().tolist())
-    train_p, val_p, test_p = default_person_split(personas, n_train=max(1, int(len(personas) * 0.67)), n_val=max(1, int(len(personas) * 0.20)))
-    df_tr, df_va, df_te = split_by_persona(df, train_p, val_p, test_p)
+    history  = meta.get("history", {})
+    val_accs = history.get("val_acc", [])
+    best_acc = max(val_accs) if val_accs else 0.0
 
-    y_tr = le.transform(df_tr["emocion"].astype(str).tolist())
-    y_va = le.transform(df_va["emocion"].astype(str).tolist())
-    
-    mean, std = compute_mean_std(df_tr["feature_path"].tolist())
-    np.save(out_dir / "train_mean.npy", mean)
-    np.save(out_dir / "train_std.npy", std)
+    print("\n" + "═" * 55)
+    print("  RESULTADO")
+    print("═" * 55)
+    print(f"  Mejor val_acc : {best_acc:.4f}  ({best_acc*100:.1f}%)")
+    print(f"  Test acc      : {meta.get('test_acc', 0.0):.4f}")
+    print(f"  Épocas        : {len(val_accs)}")
+    print(f"  Checkpoint    : {meta.get('best_checkpoint')}")
+    print("═" * 55 + "\n")
 
-    train_ds = NpySeqDataset(df_tr["feature_path"].tolist(), y_tr, mean=mean, std=std)
-    val_ds = NpySeqDataset(df_va["feature_path"].tolist(), y_va, mean=mean, std=std)
-
-    counts = np.bincount(y_tr).astype(np.float32)
-    counts = np.where(counts == 0, 1.0, counts)
-    sample_weights = (len(y_tr) / counts).astype(np.float64)[y_tr]
-    sampler = WeightedRandomSampler(torch.tensor(sample_weights, dtype=torch.double), num_samples=len(sample_weights), replacement=True)
-
-    train_dl = DataLoader(train_ds, batch_size=args.batch, sampler=sampler, collate_fn=collate_pad)
-    val_dl = DataLoader(val_ds, batch_size=args.batch, shuffle=False, collate_fn=collate_pad)
-
-    input_dim = train_ds[0][0].shape[1]
-    
-    model = EmotionLSTM(input_dim=input_dim, hidden_dim=128, num_layers=1, num_classes=len(classes), dropout=0.5, bidirectional=False).to(device)
-    loss_fn = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=2e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=3)
-
-    best_val_f1 = -1.0
-    best_path = ckpt_dir / "best_model.pth"
-
-    for ep in range(1, args.epochs + 1):
-        model.train()
-        for xb, yb, lengths in train_dl:
-            xb, yb = xb.to(device), yb.to(device)
-            optimizer.zero_grad()
-            logits = model.forward_packed(xb, lengths)
-            loss_fn(logits, yb).backward()
-            optimizer.step()
-
-        model.eval()
-        y_true, y_pred = [], []
-        with torch.no_grad():
-            for xb, yb, lengths in val_dl:
-                xb, yb = xb.to(device), yb.to(device)
-                logits = model.forward_packed(xb, lengths)
-                y_true.extend(yb.cpu().numpy())
-                y_pred.extend(torch.argmax(logits, dim=1).cpu().numpy())
-
-        va_f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
-        scheduler.step(va_f1)
-
-        print(f"[EP {ep:03d}] val_f1_macro={va_f1:.4f}")
-
-        if va_f1 > best_val_f1:
-            best_val_f1 = va_f1
-            torch.save({"model_state": model.state_dict(), "label_encoder": classes}, best_path)
 
 if __name__ == "__main__":
     main()

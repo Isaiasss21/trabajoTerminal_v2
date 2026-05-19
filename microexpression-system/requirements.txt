@@ -1,0 +1,23 @@
+# MicroExpression Analyzer — dependencias
+# Instalar con: pip install -r requirements.txt
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+PyQt6>=6.5.0
+
+# ── Deep learning ─────────────────────────────────────────────────────────────
+torch>=2.0.0
+torchvision>=0.15.0
+
+# ── Visión por computadora ────────────────────────────────────────────────────
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+
+# ── Científico / datos ────────────────────────────────────────────────────────
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# ── Persistencia ──────────────────────────────────────────────────────────────
+pandas>=2.0.0
+
+# ── Gráficas embebidas ────────────────────────────────────────────────────────
+matplotlib>=3.7.0
