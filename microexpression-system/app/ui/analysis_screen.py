@@ -136,22 +136,43 @@ class AnalysisScreen(QWidget):
         sep.setStyleSheet("color: #2A2A2A;")
         root.addWidget(sep)
 
-        # ── Área principal: preview + panel de emoción ────────────────────
+        # ── Área principal: dos previews + panel de emoción ──────────────────
         main_row = QHBoxLayout()
-        main_row.setSpacing(16)
+        main_row.setSpacing(12)
 
-        # Preview del frame en procesamiento
+        # Columna 1: video original
+        col1 = QVBoxLayout()
+        col1.setSpacing(4)
+        lbl_vid1 = QLabel("Video original")
+        lbl_vid1.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px; font-weight: bold;")
+        col1.addWidget(lbl_vid1)
         self._video_label = QLabel()
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._video_label.setStyleSheet("background: #000; border-radius: 8px; color: #555; font-size: 14px;")
+        self._video_label.setStyleSheet("background: #000; border-radius: 8px; color: #555; font-size: 13px;")
         self._video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._video_label.setMinimumSize(480, 340)
+        self._video_label.setMinimumSize(300, 220)
         self._video_label.setText("Selecciona un video para comenzar")
-        main_row.addWidget(self._video_label, stretch=3)
+        col1.addWidget(self._video_label)
+        main_row.addLayout(col1, stretch=2)
+
+        # Columna 2: video con landmarks y región de interés
+        col2 = QVBoxLayout()
+        col2.setSpacing(4)
+        lbl_vid2 = QLabel("Landmarks / ROI")
+        lbl_vid2.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px; font-weight: bold;")
+        col2.addWidget(lbl_vid2)
+        self._annotated_label = QLabel()
+        self._annotated_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._annotated_label.setStyleSheet("background: #000; border-radius: 8px; color: #555; font-size: 13px;")
+        self._annotated_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._annotated_label.setMinimumSize(300, 220)
+        self._annotated_label.setText("Sin cara detectada")
+        col2.addWidget(self._annotated_label)
+        main_row.addLayout(col2, stretch=2)
 
         # Panel lateral de última predicción
         panel = self._build_result_panel()
-        main_row.addWidget(panel, stretch=2)
+        main_row.addWidget(panel)
 
         root.addLayout(main_row)
 
@@ -207,12 +228,13 @@ class AnalysisScreen(QWidget):
         vbox.addWidget(lbl_dist)
 
         self._prob_bars: dict[str, tuple[QLabel, QProgressBar]] = {}
+        self._pct_labels: dict[str, QLabel] = {}
         emotions_es = ["Alegría", "Asco", "Enojo", "Miedo", "Neutral", "Sorpresa", "Tristeza"]
         for emo in emotions_es:
             row = QHBoxLayout()
             row.setSpacing(6)
             lbl = QLabel(emo)
-            lbl.setFixedWidth(70)
+            lbl.setFixedWidth(62)
             lbl.setStyleSheet(f"color: {_TEXT}; font-size: 11px;")
             bar = QProgressBar()
             bar.setRange(0, 100)
@@ -224,10 +246,16 @@ class AnalysisScreen(QWidget):
                 QProgressBar {{ background: #333; border-radius: 5px; }}
                 QProgressBar::chunk {{ background: {color}; border-radius: 5px; }}
             """)
+            pct_lbl = QLabel("0%")
+            pct_lbl.setFixedWidth(34)
+            pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            pct_lbl.setStyleSheet(f"color: {_SUBTEXT}; font-size: 10px;")
             row.addWidget(lbl)
             row.addWidget(bar)
+            row.addWidget(pct_lbl)
             vbox.addLayout(row)
             self._prob_bars[emo] = (lbl, bar)
+            self._pct_labels[emo] = pct_lbl
 
         vbox.addStretch()
         return panel
@@ -247,7 +275,9 @@ class AnalysisScreen(QWidget):
             self._lbl_video_path.setText(self._video_path.name)
             self._btn_analyze.setEnabled(True)
             self._btn_analyze.setStyleSheet(_BTN_ANALYZE)
-            self._video_label.setText(f"Video listo: {self._video_path.name}\nPresiona ▶ Analizar para comenzar")
+            self._video_label.setText(f"Video: {self._video_path.name}\nPresiona ▶ Analizar para comenzar")
+            self._annotated_label.clear()
+            self._annotated_label.setText("Sin cara detectada")
             self._lbl_status.setText("")
             self._progress_bar.setValue(0)
             self._progress_bar.setVisible(False)
@@ -267,6 +297,7 @@ class AnalysisScreen(QWidget):
 
         self._pipeline = VideoPipeline(self._video_path, self._engine)
         self._pipeline.frame_ready.connect(self._on_frame)
+        self._pipeline.annotated_frame_ready.connect(self._on_annotated_frame)
         self._pipeline.progress.connect(self._on_progress)
         self._pipeline.sequence_result.connect(self._on_sequence_result)
         self._pipeline.finished_processing.connect(self._on_finished)
@@ -310,6 +341,19 @@ class AnalysisScreen(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._video_label.setPixmap(scaled)
+
+    @pyqtSlot(bytes)
+    def _on_annotated_frame(self, jpeg_bytes: bytes) -> None:
+        image = QImage.fromData(jpeg_bytes, "JPEG")
+        if image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image)
+        scaled = pixmap.scaled(
+            self._annotated_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._annotated_label.setPixmap(scaled)
 
     @pyqtSlot(int, int)
     def _on_progress(self, current: int, total: int) -> None:
@@ -388,4 +432,5 @@ class AnalysisScreen(QWidget):
         for emo_es, (_, bar) in self._prob_bars.items():
             prob = result.probs.get(emo_es, 0.0)
             bar.setValue(int(prob * 100))
+            self._pct_labels[emo_es].setText(f"{prob * 100:.0f}%")
 

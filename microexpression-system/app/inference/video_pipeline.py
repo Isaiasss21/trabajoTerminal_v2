@@ -42,6 +42,7 @@ from app.inference.camera_pipeline import (
     _extract_face_and_landmarks,
     _create_roi_mask,
     _compute_flow,
+    REGIONS,
 )
 from app.inference.inference_engine import InferenceEngine, InferenceResult
 
@@ -60,11 +61,12 @@ class VideoPipeline(QThread):
         pipeline.stop()   # detener antes de tiempo si se necesita
     """
 
-    frame_ready         = pyqtSignal(bytes)   # JPEG preview
-    progress            = pyqtSignal(int, int) # (frame_actual, total_frames)
-    sequence_result     = pyqtSignal(object)   # InferenceResult
-    finished_processing = pyqtSignal(int)      # total secuencias procesadas
-    error               = pyqtSignal(str)
+    frame_ready           = pyqtSignal(bytes)    # JPEG preview frame original
+    annotated_frame_ready = pyqtSignal(bytes)    # JPEG preview con landmarks/ROI
+    progress              = pyqtSignal(int, int)  # (frame_actual, total_frames)
+    sequence_result       = pyqtSignal(object)    # InferenceResult
+    finished_processing   = pyqtSignal(int)       # total secuencias procesadas
+    error                 = pyqtSignal(str)
 
     def __init__(
         self,
@@ -127,8 +129,10 @@ class VideoPipeline(QThread):
                 frame_idx += 1
                 self.progress.emit(frame_idx, total_frames)
 
-                # ── Preview JPEG (cada N frames) ──────────────────────────
-                if frame_idx % self._preview_every == 0:
+                emit_preview = (frame_idx % self._preview_every == 0)
+
+                # ── Preview JPEG del frame original ───────────────────────
+                if emit_preview:
                     ok_enc, buf = cv2.imencode(
                         ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70]
                     )
@@ -151,13 +155,22 @@ class VideoPipeline(QThread):
                     continue
 
                 landmarks = detection.face_landmarks[0]
-                roi_gray, mapped, _ = _extract_face_and_landmarks(frame, landmarks)
+                roi_gray, mapped, bbox = _extract_face_and_landmarks(frame, landmarks)
 
                 if roi_gray is None or mapped is None:
                     prev_gray = None
                     prev_mask = None
                     sequence.clear()
                     continue
+
+                # ── Preview anotado con landmarks y ROI ───────────────────
+                if emit_preview:
+                    annotated = self._draw_annotations(frame, landmarks, bbox)
+                    ok_enc, buf = cv2.imencode(
+                        ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70]
+                    )
+                    if ok_enc:
+                        self.annotated_frame_ready.emit(bytes(buf))
 
                 mask = _create_roi_mask(mapped)
 
@@ -187,6 +200,42 @@ class VideoPipeline(QThread):
         self.finished_processing.emit(seq_count)
 
     # ── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _draw_annotations(
+        frame: np.ndarray,
+        landmarks,
+        bbox: tuple,
+    ) -> np.ndarray:
+        """Dibuja landmarks y regiones de interés sobre el frame BGR original."""
+        annotated = frame.copy()
+        x1, y1, x2, y2 = bbox
+        h, w = frame.shape[:2]
+
+        # Bounding box de la cara (verde)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 220, 0), 4)
+
+        # Todos los landmarks como puntos pequeños (cyan)
+        px = [[int(pt.x * w), int(pt.y * h)] for pt in landmarks]
+        for lx, ly in px:
+            cv2.circle(annotated, (lx, ly), 2, (0, 210, 210), -1)
+
+        # Regiones de interés con colores distintos
+        _region_colors = {
+            "left_eyebrow":  (0, 165, 255),
+            "right_eyebrow": (0, 165, 255),
+            "left_eye":      (255, 100, 50),
+            "right_eye":     (255, 100, 50),
+            "mouth":         (60, 60, 255),
+            "nose":          (180, 220, 0),
+        }
+        for region_name, (indices, _weight) in REGIONS.items():
+            color = _region_colors.get(region_name, (200, 200, 200))
+            for idx in indices:
+                if idx < len(px):
+                    cv2.circle(annotated, (px[idx][0], px[idx][1]), 5, color, -1)
+
+        return annotated
 
     def _init_landmarker(self):
         """Carga el detector de landmarks de MediaPipe. Retorna None si no disponible."""

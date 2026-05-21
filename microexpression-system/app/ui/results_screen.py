@@ -132,12 +132,17 @@ class ResultsScreen(QWidget):
         if not self._current_stats:
             return
 
-        # Limpiar contenido previo
-        self._placeholder.hide()
+        # Limpiar contenido previo (todo excepto el stretch final)
         while self._content_layout.count() > 1:
             item = self._content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w is not None and w is not self._placeholder:
+                w.deleteLater()
+        # Ocultar placeholder (puede haber sido ya retirado del layout)
+        try:
+            self._placeholder.hide()
+        except RuntimeError:
+            pass
 
         stats = self._current_stats
 
