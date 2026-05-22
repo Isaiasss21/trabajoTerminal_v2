@@ -48,6 +48,36 @@ FARNEBACK_PARAMS = dict(
     iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
 )
 
+# CLAHE reutilizable: mejora contraste local en imágenes IR y con poca luz
+# sin degradar imágenes bien iluminadas (clipLimit moderado)
+_CLAHE = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+
+# Tabla LUT de gamma correction (gamma=0.55): aclara medios tonos oscuros del IR
+_GAMMA_LUT = np.array(
+    [int((i / 255.0) ** 0.55 * 255 + 0.5) for i in range(256)], dtype=np.uint8
+)
+
+
+def _apply_ir_filter(frame: np.ndarray) -> np.ndarray:
+    """
+    Convierte un frame IR (NIR, night-vision) a pseudo-RGB optimizado para MediaPipe.
+
+    Pipeline:
+      1. Escala de grises
+      2. Gamma correction (gamma=0.55) → aclara medios tonos oscuros del NIR
+      3. CLAHE fuerte → realza texturas faciales (cejas, párpados, labios)
+      4. Gaussian blur 3×3 → reduce el ruido salt-and-pepper del sensor IR
+      5. Pseudo-RGB (3 canales iguales) para que MediaPipe lo acepte
+
+    Returns:
+        np.ndarray (H, W, 3) uint8 contiguo, formato SRGB.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = _GAMMA_LUT[gray]               # gamma correction rápida por LUT
+    gray = _CLAHE.apply(gray)             # realce adaptativo de contraste
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)  # suavizado de ruido
+    return np.ascontiguousarray(cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB))
+
 REGIONS: dict[str, tuple[list[int], float]] = {
     "left_eyebrow":  ([70, 63, 105, 66, 107, 55, 65, 52, 53, 46],  1.0),
     "right_eyebrow": ([300, 293, 334, 296, 336, 285, 295, 282, 283, 276], 1.0),
@@ -82,6 +112,7 @@ def _extract_face_and_landmarks(
     if x2 <= x1 or y2 <= y1:
         return None, None, None
     roi_gray = cv2.cvtColor(image[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+    roi_gray = _CLAHE.apply(roi_gray)   # mejora contraste en IR / poca luz
     roi_resized = cv2.resize(roi_gray, FACE_SIZE)
     sx = FACE_SIZE[0] / (x2 - x1)
     sy = FACE_SIZE[1] / (y2 - y1)
@@ -212,7 +243,13 @@ class CameraPipeline(QThread):
                 # ── Detección de landmarks ────────────────────────────────
                 face_detected = False
                 if landmarker is not None:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Preprocesamiento IR: convertir a gris, CLAHE fuerte, volver a pseudo-RGB.
+                    # Mejora la detección de cara en cámaras de infrarrojo cercano (NIR).
+                    gray_ir = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    gray_ir = _CLAHE.apply(gray_ir)
+                    rgb = np.ascontiguousarray(
+                        cv2.cvtColor(gray_ir, cv2.COLOR_GRAY2RGB)
+                    )
                     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                     result   = landmarker.detect(mp_image)
 
@@ -270,5 +307,7 @@ class CameraPipeline(QThread):
             output_face_blendshapes=False,
             output_facial_transformation_matrixes=False,
             num_faces=1,
+            min_face_detection_confidence=0.3,   # más bajo para detectar caras en IR
+            min_face_presence_confidence=0.3,
         )
         return mp_vision.FaceLandmarker.create_from_options(options)

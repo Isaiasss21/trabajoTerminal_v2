@@ -69,7 +69,8 @@ class GradCAMExtractor:
         self._activations = out.detach()
 
     def _bwd_hook(self, module, grad_in, grad_out) -> None:  # noqa: ANN001
-        self._gradients = grad_out[0].detach()
+        if grad_out and grad_out[0] is not None:
+            self._gradients = grad_out[0].detach()
 
     # ── API pública ────────────────────────────────────────────────────────
 

@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QFrame, QSizePolicy, QProgressBar, QFileDialog, QCheckBox,
 )
 
-from app.inference.inference_engine import InferenceEngine, InferenceResult, EMOTION_COLORS
+from app.inference.inference_engine import InferenceEngine, InferenceResult, EMOTION_COLORS, EMOTION_LABELS_ES
 from app.inference.video_pipeline import VideoPipeline
 from app.storage.session_manager import SessionManager, Prediction, Session
 
@@ -138,6 +138,17 @@ class AnalysisScreen(QWidget):
         )
         ctrl_bar.addWidget(self._chk_gradcam)
 
+        self._chk_ir = QCheckBox("📡 Modo IR")
+        self._chk_ir.setStyleSheet(
+            f"color: {_TEXT}; font-size: 12px; padding-left: 4px;"
+        )
+        self._chk_ir.setToolTip(
+            "Activa el filtro infrarrojo (gamma + CLAHE + blur) para vídeos\n"
+            "grabados con cámara NIR / night-vision. Mejora la detección\n"
+            "de cara y el flujo óptico en imágenes IR de baja textura."
+        )
+        ctrl_bar.addWidget(self._chk_ir)
+
         root.addLayout(ctrl_bar)
 
         # ── Separador ─────────────────────────────────────────────────────
@@ -237,9 +248,17 @@ class AnalysisScreen(QWidget):
         lbl_dist.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px; font-weight: bold;")
         vbox.addWidget(lbl_dist)
 
+        # Contenedor exclusivo para las barras de probabilidad (separado del Grad-CAM)
+        bars_container = QWidget()
+        bars_container.setStyleSheet("background: transparent;")
+        self._bars_vbox = QVBoxLayout(bars_container)
+        self._bars_vbox.setContentsMargins(0, 0, 0, 0)
+        self._bars_vbox.setSpacing(4)
+        vbox.addWidget(bars_container)
+
         self._prob_bars: dict[str, tuple[QLabel, QProgressBar]] = {}
         self._pct_labels: dict[str, QLabel] = {}
-        emotions_es = ["Alegría", "Asco", "Enojo", "Miedo", "Neutral", "Sorpresa", "Tristeza"]
+        emotions_es = ["Alegría", "Asco", "Neutral", "Sorpresa", "Tristeza"]
         for emo in emotions_es:
             row = QHBoxLayout()
             row.setSpacing(6)
@@ -263,7 +282,7 @@ class AnalysisScreen(QWidget):
             row.addWidget(lbl)
             row.addWidget(bar)
             row.addWidget(pct_lbl)
-            vbox.addLayout(row)
+            self._bars_vbox.addLayout(row)
             self._prob_bars[emo] = (lbl, bar)
             self._pct_labels[emo] = pct_lbl
 
@@ -291,6 +310,49 @@ class AnalysisScreen(QWidget):
         vbox.addWidget(self._gradcam_lbl)
 
         return panel
+
+    def _rebuild_bars(self, emotions_es: list[str]) -> None:
+        """
+        Reconstruye las filas de barras de probabilidad según las emociones del modelo.
+        Solo toca el contenedor de barras (self._bars_vbox), nunca el Grad-CAM.
+        """
+        # Limpiar todas las filas actuales del contenedor de barras
+        while self._bars_vbox.count() > 0:
+            item = self._bars_vbox.takeAt(0)
+            if item is not None:
+                w = item.widget()
+                if w:
+                    w.setParent(None)
+
+        self._prob_bars.clear()
+        self._pct_labels.clear()
+
+        for emo in emotions_es:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lbl = QLabel(emo)
+            lbl.setFixedWidth(62)
+            lbl.setStyleSheet(f"color: {_TEXT}; font-size: 11px;")
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(10)
+            color = EMOTION_COLORS.get(emo, _ACCENT)
+            bar.setStyleSheet(f"""
+                QProgressBar {{ background: #333; border-radius: 5px; }}
+                QProgressBar::chunk {{ background: {color}; border-radius: 5px; }}
+            """)
+            pct_lbl = QLabel("0%")
+            pct_lbl.setFixedWidth(34)
+            pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            pct_lbl.setStyleSheet(f"color: {_SUBTEXT}; font-size: 10px;")
+            row.addWidget(lbl)
+            row.addWidget(bar)
+            row.addWidget(pct_lbl)
+            self._bars_vbox.addLayout(row)
+            self._prob_bars[emo] = (lbl, bar)
+            self._pct_labels[emo] = pct_lbl
 
     # ── Selección de video ────────────────────────────────────────────────
 
@@ -327,6 +389,14 @@ class AnalysisScreen(QWidget):
         self._session = self._session_manager.new_session()
         self._lbl_seq_count.setText("Secuencias: 0")
 
+        # Reconstruir barras según las emociones del modelo cargado
+        active_emotions = [
+            EMOTION_LABELS_ES[raw]
+            for raw in sorted(self._engine.label_map, key=lambda k: self._engine.label_map[k])
+            if raw in EMOTION_LABELS_ES
+        ]
+        self._rebuild_bars(active_emotions)
+
         self._pipeline = VideoPipeline(self._video_path, self._engine)
         self._pipeline.frame_ready.connect(self._on_frame)
         self._pipeline.annotated_frame_ready.connect(self._on_annotated_frame)
@@ -337,6 +407,8 @@ class AnalysisScreen(QWidget):
         self._pipeline.gradcam_ready.connect(self._on_gradcam_frame)
         if self._chk_gradcam.isChecked():
             self._pipeline.enable_gradcam(True)
+        if self._chk_ir.isChecked():
+            self._pipeline.enable_ir(True)
         self._pipeline.start()
 
         self._btn_select.setEnabled(False)

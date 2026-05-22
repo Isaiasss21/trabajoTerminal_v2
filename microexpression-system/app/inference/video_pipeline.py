@@ -39,6 +39,8 @@ except ImportError:
 from app.inference.camera_pipeline import (
     SEQUENCE_LENGTH,
     SEQUENCE_STEP,
+    _CLAHE,
+    _apply_ir_filter,
     _DEFAULT_MODEL_PATH,
     _extract_face_and_landmarks,
     _create_roi_mask,
@@ -87,12 +89,17 @@ class VideoPipeline(QThread):
         self._preview_every   = preview_every
         self._stop_flag       = False
         self._gradcam_enabled = False
+        self._ir_mode         = False
 
-    # ── API pública ───────────────────────────────────────────────
+    # ── API pública ────────────────────────────────
 
     def enable_gradcam(self, enabled: bool) -> None:
         """Activa o desactiva la generación de heatmaps Grad-CAM tras cada predicción."""
         self._gradcam_enabled = enabled
+
+    def enable_ir(self, enabled: bool) -> None:
+        """Activa el filtro IR (gamma + CLAHE + blur) para vídeos de cámara infrarroja."""
+        self._ir_mode = enabled
 
     def stop(self) -> None:
         """Solicita la detención del procesamiento y espera hasta 5 s."""
@@ -151,7 +158,15 @@ class VideoPipeline(QThread):
                 if landmarker is None:
                     continue
 
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                if self._ir_mode:
+                    rgb = _apply_ir_filter(frame)   # filtro IR: gamma + CLAHE + blur
+                else:
+                    # Preprocesamiento estándar (cámara visible)
+                    gray_ir = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    gray_ir = _CLAHE.apply(gray_ir)
+                    rgb = np.ascontiguousarray(
+                        cv2.cvtColor(gray_ir, cv2.COLOR_GRAY2RGB)
+                    )
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 detection = landmarker.detect(mp_image)
 
@@ -289,5 +304,7 @@ class VideoPipeline(QThread):
             output_face_blendshapes=False,
             output_facial_transformation_matrixes=False,
             num_faces=1,
+            min_face_detection_confidence=0.3,   # más bajo para detectar caras en IR
+            min_face_presence_confidence=0.3,
         )
         return mp_vision.FaceLandmarker.create_from_options(options)
