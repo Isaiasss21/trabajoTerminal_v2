@@ -349,13 +349,27 @@ class AnalysisScreen(QWidget):
         Reconstruye las filas de barras de probabilidad según las emociones del modelo.
         Solo toca el contenedor de barras (self._bars_vbox), nunca el Grad-CAM.
         """
-        # Limpiar todas las filas actuales del contenedor de barras
+        # Limpiar todas las filas actuales del contenedor de barras.
+        # Cada fila es un QHBoxLayout (no un widget directo), por eso hay que
+        # bajar un nivel más y eliminar los widgets dentro de cada sub-layout.
         while self._bars_vbox.count() > 0:
             item = self._bars_vbox.takeAt(0)
-            if item is not None:
+            if item is None:
+                continue
+            sub = item.layout()
+            if sub is not None:
+                while sub.count() > 0:
+                    sub_item = sub.takeAt(0)
+                    if sub_item:
+                        w = sub_item.widget()
+                        if w:
+                            w.setParent(None)
+                            w.deleteLater()
+            else:
                 w = item.widget()
                 if w:
                     w.setParent(None)
+                    w.deleteLater()
 
         self._prob_bars.clear()
         self._pct_labels.clear()
