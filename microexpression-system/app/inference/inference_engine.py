@@ -73,7 +73,7 @@ EMOTION_COLORS: dict[str, str] = {
 }
 
 # RB02: umbrales de confianza
-CONFIDENCE_UNCERTAIN = 0.35   # zona incierta  (0.35 ≤ conf < 0.55 → ⚠)
+CONFIDENCE_UNCERTAIN = 0.20   # zona incierta  (0.20 ≤ conf < 0.55 → ⚠)
 CONFIDENCE_VALID     = 0.55   # umbral de aceptación (≥ 0.55 → ✔ válida)
 
 NUM_FRAMES_DEFAULT = 16       # frames muestreados por secuencia
@@ -343,7 +343,7 @@ class InferenceResult:
     raw_label:    str              # Label del modelo (e.g. "felicidad")
     confidence:   float            # Confianza de la clase predicha [0, 1]
     is_valid:     bool             # confidence >= CONFIDENCE_VALID (RB02)
-    is_uncertain: bool             # CONFIDENCE_UNCERTAIN <= conf < CONFIDENCE_VALID
+    is_uncertain: bool             # 0.20 <= conf < CONFIDENCE_VALID (zona incierta)
     probs:        dict[str, float] = field(default_factory=dict)
 
 
