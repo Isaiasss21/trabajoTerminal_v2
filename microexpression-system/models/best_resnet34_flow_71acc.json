@@ -1,1 +1,1 @@
-{"label_map": {"asco": 0, "felicidad": 1, "neutral": 2, "sorpresa": 3, "tristeza": 4}}
+{"label_map": {"asco": 0, "felicidad": 1, "miedo": 2, "neutral": 3, "sorpresa": 4}}
