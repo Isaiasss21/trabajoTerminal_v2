@@ -11,7 +11,7 @@ La aplicación se organiza en **cuatro pantallas principales**:
 
 | Pantalla | Función |
 |---|---|
-| Análisis | Carga de video, procesamiento y visualización en tiempo de análisis |
+| Análisis | Carga de video, procesamiento, visualización y explicabilidad XAI |
 | Resultados | Resumen estadístico y gráfica de la sesión analizada |
 | Historial | Lista de todas las sesiones almacenadas con acciones sobre cada una |
 | Ajustes | Configuración del modelo de inferencia, cámara y preferencias |
@@ -49,30 +49,43 @@ La pantalla de análisis es el componente central del sistema. Permite al usuari
 ### 3.2 Distribución Visual
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│  [📂 Seleccionar video]  nombre_video.mp4  Secuencias: 8  [▶ Analizar] [■ Cancelar] │
-├────────────────────────────────────────────────────────────────┬──────────────────┤
-│                                                                │ Última predicción│
-│  ┌──────────────────────┐   ┌──────────────────────┐          │                  │
-│  │  Video original      │   │  Landmarks / ROI     │          │ Neutral          │
-│  │                      │   │                      │          │ Confianza: 78.5% │
-│  │  [frame del video]   │   │  [frame anotado con  │          │ ✔ Detección      │
-│  │                      │   │   landmarks y bbox]  │          │   válida         │
-│  └──────────────────────┘   └──────────────────────┘          │ ─────────────── │
-│                                                                │ Distribución     │
-│  ████████████████████░░░░  Frame 240 / 450                    │ Alegría  ▓░  7%  │
-└────────────────────────────────────────────────────────────────┴──────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│  [📂 Seleccionar video]  nombre_video.mp4   Sec: 8   [🔥 Grad-CAM] [🔷 SHAP] [📷 IR]  [▶ Analizar] [■ Cancelar] │
+├───────────────────────────────────────────────────────────────┬───────────────────┤
+│                                                               │ Última predicción │
+│  ┌─────────────────────┐   ┌─────────────────────┐           │                   │
+│  │  Video original     │   │  Landmarks / ROI    │           │ Neutral           │
+│  │                     │   │                     │           │ Confianza: 78.5%  │
+│  │  [frame del video]  │   │  [frame anotado]    │           │ ✔ Detección       │
+│  │                     │   │                     │           │    válida         │
+│  └─────────────────────┘   └─────────────────────┘           │ ──────────────── │
+│                                                               │ Distribución      │
+│  ████████████████████░░░  Frame 240 / 450                    │ Alegría   ▓░  7%  │
+│                                                               │ ──────────────── │
+│  🔥 Grad-CAM (flujo óptico)                                  │ 🔥 Grad-CAM       │
+│  ┌──────────────────────────────────────────────────────┐    │ [mapa JET]        │
+│  │  [mapa de calor JET superpuesto sobre el ROI]        │    │ ──────────────── │
+│  └──────────────────────────────────────────────────────┘    │ 🔷 SHAP           │
+│                                                               │ [mapa PLASMA]     │
+│  🔷 SHAP (atribuciones pixel-a-pixel)                        │                   │
+│  ┌──────────────────────────────────────────────────────┐    │                   │
+│  │  [mapa de atribuciones PLASMA superpuesto]           │    │                   │
+│  └──────────────────────────────────────────────────────┘    │                   │
+└───────────────────────────────────────────────────────────────┴───────────────────┘
 ```
 
 ### 3.3 Componentes de la Interfaz
 
 #### Barra de control superior
 
-La barra superior concentra todos los controles de inicio y cancelación del análisis:
+La barra superior concentra todos los controles de inicio, cancelación y activación de módulos XAI:
 
 - **Botón "📂 Seleccionar video"**: Abre un diálogo de selección de archivos filtrado por formatos de video comunes (`.mp4`, `.avi`, `.mov`, `.mkv`, `.wmv`). Una vez seleccionado, muestra el nombre del archivo junto al botón.
 - **Etiqueta del archivo**: Muestra el nombre del video seleccionado o el texto *"Ningún video seleccionado"* en su estado inicial.
 - **Contador de secuencias**: Muestra en tiempo real cuántas secuencias completas de flujo óptico han sido procesadas e inferidas durante el análisis activo.
+- **Checkbox "🔥 Grad-CAM"**: Activa el módulo de Gradient-weighted Class Activation Mapping. Cuando está marcado, cada secuencia genera un mapa de calor (colormap JET) que resalta las regiones del flujo óptico que más influyeron en la predicción. El mapa se muestra en un panel dedicado dentro del área de visualización.
+- **Checkbox "🔷 SHAP"**: Activa el módulo de atribuciones SHAP (GradientSHAP / Integrated Gradients). Cuando está marcado, cada secuencia genera un mapa de atribuciones pixel-a-pixel (colormap PLASMA) que indica la contribución de cada píxel a la predicción. El cálculo incluye 15 pasos de integración de gradientes.
+- **Checkbox "📷 IR"**: Activa el filtro para cámaras infrarrojas. Aplica una cadena de procesamiento (corrección gamma + CLAHE + suavizado gaussiano) para mejorar la detección facial en cámaras NIR que generan imágenes de bajo contraste.
 - **Botón "▶ Analizar"**: Inicia el pipeline de procesamiento. Permanece deshabilitado hasta que se seleccione un video y el modelo esté cargado. Al activarse, cambia a color verde como indicador visual.
 - **Botón "■ Cancelar"**: Interrumpe el análisis en curso. Solo se activa durante el procesamiento activo.
 
@@ -107,7 +120,15 @@ El panel lateral de ancho fijo (280 px) muestra los resultados de la última sec
   - ✘ Baja confianza — rojo
 - **Distribución de probabilidades**: Una barra de progreso por cada clase emocional, con el porcentaje exacto visible a la derecha de cada barra. Las barras se actualizan con cada nueva predicción.
 
-Las clases disponibles son: **Asco, Felicidad, Neutral, Sorpresa ** y **Tristeza**.
+Las clases disponibles dependen del modelo cargado. Con el modelo por defecto (`best_resnet18_flow.pth`): **Asco, Alegría, Neutral, Sorpresa** y **Tristeza** (5 clases). Las barras se reconstruyen dinámicamente al inicio de cada análisis, adaptándose automáticamente al `label_map` del modelo activo.
+
+#### Paneles de explicabilidad XAI
+
+Cuando los checkboxes de Grad-CAM o SHAP están activos, se muestran paneles adicionales en la parte inferior del panel derecho:
+
+- **Panel Grad-CAM** (🔥): Muestra el mapa de calor en colormap **JET** (azul→verde→rojo) superpuesto sobre el ROI facial. Las zonas rojas indican las regiones espaciales del flujo óptico que más activaron la red para la clase predicha. Se calcula mediante retropropagación sobre la última capa convolucional del backbone ResNet (`layer4`) y se promedia sobre todos los frames de la secuencia.
+
+- **Panel SHAP** (🔷): Muestra el mapa de atribuciones en colormap **PLASMA** (negro→morado→amarillo) superpuesto sobre el ROI. Indica la contribución pixel-a-pixel de cada región a la decisión del modelo, calculado mediante Integrated Gradients (15 pasos de interpolación desde una baseline cero hasta la entrada real). Este colormap diferente al de Grad-CAM permite distinguir ambas técnicas visualmente de forma inmediata.
 
 #### Barra de progreso
 
@@ -119,10 +140,24 @@ El flujo de operación de esta pantalla sigue la siguiente secuencia:
 
 1. El usuario selecciona un archivo de video.
 2. El sistema habilita el botón de análisis.
-3. Al iniciar, se crea una nueva sesión en el gestor de almacenamiento y se lanza el hilo `VideoPipeline`.
-4. El hilo emite frames de previsualización, progreso, resultados de secuencias y señal de finalización.
-5. Cada resultado de secuencia se muestra en el panel lateral y se guarda en la sesión activa.
-6. Al concluir, la sesión se cierra automáticamente y la pantalla emite la señal `session_finished` con el identificador único de sesión, lo que provoca la navegación automática a la pantalla de Resultados.
+3. El usuario puede activar opcionalmente Grad-CAM, SHAP y/o el filtro IR mediante los checkboxes de la barra superior.
+4. Al iniciar, se crea una nueva sesión en el gestor de almacenamiento, se reconstruyen las barras de probabilidad según las clases del modelo activo, y se lanza el hilo `VideoPipeline` con los módulos XAI habilitados según la configuración.
+5. El hilo de procesamiento aplica una **ventana deslizante** (`SEQUENCE_LENGTH=15`, `SEQUENCE_STEP=5`) para capturar microexpresiones cortas: genera una nueva secuencia cada 5 frames, superponiendo frames con la secuencia anterior.
+6. El hilo emite en paralelo: frames de previsualización, frames anotados, progreso, resultados de secuencias, y opcionalmente mapas de Grad-CAM (`gradcam_ready`) y SHAP (`shap_ready`).
+7. Cada resultado de secuencia se muestra en el panel lateral y se guarda en la sesión activa.
+8. Al concluir, la sesión se cierra automáticamente y la pantalla emite la señal `session_finished` con el identificador único de sesión, lo que provoca la navegación automática a la pantalla de Resultados.
+
+### 3.5 Pipeline de Inferencia
+
+Cada secuencia de 15 frames pasa por el siguiente pipeline antes de la clasificación:
+
+1. **Detección facial** con MediaPipe Face Landmarker — extrae la región de interés (ROI) del rostro.
+2. **Cálculo de flujo óptico** (algoritmo Farneback de OpenCV) entre pares de frames consecutivos — genera el campo de movimiento que captura microexpresiones.
+3. **Preprocesamiento**: redimensionado a 224×224, normalización con media y desviación estándar `[0.5, 0.5, 0.5]`.
+4. **Inferencia** con el clasificador ResNet18 + agregación temporal por promedio ponderado.
+5. **Temperature scaling** (`T=2.0`) aplicado a los logits antes del softmax para suavizar la distribución de probabilidades.
+6. **(Opcional) Grad-CAM**: retropropagación sobre `backbone.layer4[-1]`, promediado temporal → mapa JET.
+7. **(Opcional) SHAP / IG**: integración de gradientes en 15 pasos desde baseline cero → mapa PLASMA.
 
 ---
 
@@ -261,10 +296,18 @@ MainWindow
 │
 └── QStackedWidget
     ├── AnalysisScreen
-    │   ├── Barra de control (selección y botones)
+    │   ├── Barra de control (selección, XAI checkboxes, botones)
+    │   │   ├── QCheckBox: 🔥 Grad-CAM
+    │   │   ├── QCheckBox: 🔷 SHAP
+    │   │   └── QCheckBox: 📷 IR
     │   ├── Panel video original (QLabel)
-    │   ├── Panel video anotado (QLabel)
-    │   └── Panel de predicción (barras + emoción)
+    │   ├── Panel video anotado con landmarks (QLabel)
+    │   ├── Panel de predicción
+    │   │   ├── Etiqueta de emoción + confianza
+    │   │   ├── Barras de probabilidad (dinámicas por modelo)
+    │   │   ├── Panel Grad-CAM (QLabel, colormap JET)
+    │   │   └── Panel SHAP (QLabel, colormap PLASMA)
+    │   └── Barra de progreso
     ├── ResultsScreen
     │   ├── Tarjeta de métricas
     │   └── Gráfica matplotlib
@@ -280,13 +323,52 @@ MainWindow
 
 ---
 
-## 8. Tecnologías Utilizadas en la Interfaz
+## 8. Módulos de Explicabilidad XAI
+
+### 8.1 Grad-CAM (`GradCAMExtractor`)
+
+Implementado en `app/inference/explainability.py`. Registra hooks en la última capa del bloque `backbone.layer4` del ResNet para capturar activaciones y gradientes durante la inferencia.
+
+**Algoritmo:**
+1. Forward pass sobre la secuencia — captura activaciones `(B·T, C, h, w)`.
+2. Backward sobre el score de la clase predicha — captura gradientes `(B·T, C, h, w)`.
+3. Pesos por canal = promedio espacial de gradientes (GAP).
+4. CAM = ReLU(Σ peso_c × activación_c) → `(B·T, h, w)`.
+5. Promedio temporal sobre T frames → mapa final `(h, w)`.
+6. Redimensionado al tamaño del ROI y colorización **COLORMAP_JET**.
+
+### 8.2 SHAP / Integrated Gradients (`SHAPExplainer`)
+
+Implementado en `app/inference/explainability.py`. Usa `shap.GradientExplainer` si la librería `shap` está instalada; de lo contrario, implementa Integrated Gradients directamente (mismo resultado conceptual).
+
+**Algoritmo (IG):**
+1. Baseline = tensor de ceros `(1, T, 3, H, W)` — representa ausencia de información.
+2. Se generan `n=15` interpolaciones: $x_{\alpha_k} = \alpha_k \cdot x_{\text{real}}$, con $\alpha \in [0, 1]$.
+3. En cada paso: forward + backward → gradiente por píxel respecto a la clase predicha.
+4. Atribución = $(x - x_{\text{baseline}}) \times \frac{1}{n} \sum \nabla_x F(x_{\alpha_k})$.
+5. Promedio del valor absoluto sobre T frames y 3 canales → mapa espacial `(H, W)`.
+6. Normalización min-max, redimensionado y colorización **COLORMAP_PLASMA**.
+
+| Característica | Grad-CAM | SHAP / IG |
+|---|---|---|
+| Colormap | JET (azul→rojo) | PLASMA (negro→amarillo) |
+| Resolución nativa | 7×7 (escalado) | 224×224 |
+| Velocidad (CPU) | ~instantáneo | ~0.3-0.5 s/secuencia |
+| Base matemática | Activaciones ponderadas | Valores de Shapley (IG) |
+
+---
+
+## 9. Tecnologías Utilizadas en la Interfaz
 
 | Componente | Tecnología |
 |---|---|
 | Framework de interfaz | PyQt6 (Python bindings para Qt 6) |
 | Procesamiento de video | OpenCV (`cv2`) |
+| Flujo óptico | Algoritmo Farneback (OpenCV) |
 | Detección facial y landmarks | MediaPipe Face Landmarker |
+| Modelo de clasificación | ResNet18 + agregación temporal (PyTorch) |
+| Explicabilidad — Grad-CAM | Implementación propia con hooks PyTorch |
+| Explicabilidad — SHAP | `shap.GradientExplainer` / Integrated Gradients propio |
 | Gráficas estadísticas | Matplotlib con backend `QtAgg` |
 | Hilos de procesamiento | `QThread` de Qt |
 | Comunicación inter-hilo | Señales y slots de Qt (`pyqtSignal`, `pyqtSlot`) |
