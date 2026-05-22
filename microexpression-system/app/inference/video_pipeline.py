@@ -38,6 +38,7 @@ except ImportError:
 
 from app.inference.camera_pipeline import (
     SEQUENCE_LENGTH,
+    SEQUENCE_STEP,
     _DEFAULT_MODEL_PATH,
     _extract_face_and_landmarks,
     _create_roi_mask,
@@ -114,7 +115,8 @@ class VideoPipeline(QThread):
             total_frames = 0  # stream o archivo sin metadatos de duración
 
         # ── 3. Procesar frames ────────────────────────────────────────────
-        sequence:  list[np.ndarray] = []
+        sequence:     list[np.ndarray] = []  # ventana deslizante de flujo
+        frames_since_pred = 0               # frames nuevos desde última predicción
         prev_gray: Optional[np.ndarray] = None
         prev_mask: Optional[np.ndarray] = None
         frame_idx  = 0
@@ -148,10 +150,11 @@ class VideoPipeline(QThread):
                 detection = landmarker.detect(mp_image)
 
                 if not detection.face_landmarks:
-                    # Sin cara → resetear secuencia acumulada
+                    # Sin cara → resetear ventana deslizante
                     prev_gray = None
                     prev_mask = None
                     sequence.clear()
+                    frames_since_pred = 0
                     continue
 
                 landmarks = detection.face_landmarks[0]
@@ -161,6 +164,7 @@ class VideoPipeline(QThread):
                     prev_gray = None
                     prev_mask = None
                     sequence.clear()
+                    frames_since_pred = 0
                     continue
 
                 # ── Preview anotado con landmarks y ROI ───────────────────
@@ -177,11 +181,16 @@ class VideoPipeline(QThread):
                 if prev_gray is not None:
                     flow_frame = _compute_flow(prev_gray, roi_gray, mask)
                     sequence.append(flow_frame)
+                    frames_since_pred += 1
 
-                    # ── Secuencia completa → inferir ──────────────────────
-                    if len(sequence) >= self._sequence_length:
-                        seq_array = np.stack(sequence, axis=0)  # (N,64,64,3)
-                        sequence.clear()
+                    # ── Ventana deslizante: predice cada SEQUENCE_STEP frames nuevos ──
+                    if (len(sequence) >= self._sequence_length
+                            and frames_since_pred >= SEQUENCE_STEP):
+                        seq_array = np.stack(sequence[-self._sequence_length:], axis=0)
+                        # Descartar frames viejos para no crecer indefinidamente
+                        if len(sequence) > self._sequence_length:
+                            del sequence[:-self._sequence_length]
+                        frames_since_pred = 0
                         try:
                             result = self._engine.predict(seq_array)
                             self.sequence_result.emit(result)

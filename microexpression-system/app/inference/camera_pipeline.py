@@ -42,6 +42,7 @@ except ImportError:
 
 FACE_SIZE       = (64, 64)
 SEQUENCE_LENGTH = 15
+SEQUENCE_STEP   = 5   # ventana deslizante: predice cada N frames nuevos
 FARNEBACK_PARAMS = dict(
     pyr_scale=0.5, levels=3, winsize=15,
     iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
