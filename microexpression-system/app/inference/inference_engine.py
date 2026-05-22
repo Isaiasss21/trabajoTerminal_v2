@@ -457,8 +457,10 @@ class InferenceEngine:
             backbone = "densenet121"
         elif any("backbone.layer4.0.conv3" in k for k in keys):
             backbone = "resnet50"
+        elif any("backbone.layer3.5" in k for k in keys):
+            backbone = "resnet34"   # layer3 tiene 6 bloques en resnet34
         else:
-            backbone = "resnet18"   # resnet18 o resnet34, mismo feature_dim
+            backbone = "resnet18"
 
         # ── Temporal pooling ─────────────────────────────────────────────────
         use_temporal_attn = any(k.startswith("temporal_pool") for k in keys)
