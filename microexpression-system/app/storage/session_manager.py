@@ -41,7 +41,7 @@ class Prediction:
     emotion: str              # e.g. "Alegría"
     raw_label: str            # label del modelo, e.g. "felicidad"
     confidence: float         # 0.0 – 1.0
-    is_valid: bool            # confidence >= 0.70 y duración válida (RB01, RB02)
+    is_valid: bool            # confidence >= 0.55 y duración válida (RB01, RB02)
     duration_ms: int          # duración estimada en ms (RB01: 100-500 ms)
     landmarks_detected: bool  # si MediaPipe detectó rostro en ese frame (RB03)
     intensity: float = 0.0    # placeholder; puede calcularse externamente

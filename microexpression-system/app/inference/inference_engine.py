@@ -73,8 +73,8 @@ EMOTION_COLORS: dict[str, str] = {
 }
 
 # RB02: umbrales de confianza
-CONFIDENCE_UNCERTAIN = 0.50   # zona incierta
-CONFIDENCE_VALID     = 0.70   # umbral de aceptación
+CONFIDENCE_UNCERTAIN = 0.35   # zona incierta  (0.35 ≤ conf < 0.55 → ⚠)
+CONFIDENCE_VALID     = 0.55   # umbral de aceptación (≥ 0.55 → ✔ válida)
 
 NUM_FRAMES_DEFAULT = 16       # frames muestreados por secuencia
 SOFTMAX_TEMPERATURE = 2.0    # suaviza la distribución de probabilidades (>1 = menos seguro, más informativo)
