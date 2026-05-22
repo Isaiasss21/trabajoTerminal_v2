@@ -77,6 +77,7 @@ CONFIDENCE_UNCERTAIN = 0.50   # zona incierta
 CONFIDENCE_VALID     = 0.70   # umbral de aceptación
 
 NUM_FRAMES_DEFAULT = 16       # frames muestreados por secuencia
+SOFTMAX_TEMPERATURE = 2.0    # suaviza la distribución de probabilidades (>1 = menos seguro, más informativo)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -436,7 +437,7 @@ class InferenceEngine:
         avg_probs = torch.zeros(1, len(self._label_map), device=self._device)
         with torch.no_grad():
             for view in views:
-                avg_probs += torch.softmax(self._model(view), dim=1)
+                avg_probs += torch.softmax(self._model(view) / SOFTMAX_TEMPERATURE, dim=1)
         avg_probs /= len(views)
         return self._probs_to_result(avg_probs[0].cpu().numpy())
 
@@ -546,7 +547,8 @@ class InferenceEngine:
     def _run_inference(self, tensor: torch.Tensor) -> InferenceResult:
         self._model.eval()
         with torch.no_grad():
-            probs = torch.softmax(self._model(tensor), dim=1)[0].cpu().numpy()
+            logits = self._model(tensor)
+            probs  = torch.softmax(logits / SOFTMAX_TEMPERATURE, dim=1)[0].cpu().numpy()
         return self._probs_to_result(probs)
 
     def _probs_to_result(self, probs: np.ndarray) -> InferenceResult:
