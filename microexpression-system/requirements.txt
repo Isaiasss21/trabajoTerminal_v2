@@ -21,3 +21,7 @@ pandas>=2.0.0
 
 # ── Gráficas embebidas ────────────────────────────────────────────────────────
 matplotlib>=3.7.0
+
+# ── Explicabilidad (XAI) ──────────────────────────────────────────────────────
+# Opcional: si no está instalado, el módulo SHAP usa Integrated Gradients propios.
+shap>=0.44.0

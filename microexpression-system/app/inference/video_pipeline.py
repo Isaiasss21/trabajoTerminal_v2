@@ -67,6 +67,7 @@ class VideoPipeline(QThread):
     frame_ready           = pyqtSignal(bytes)    # JPEG preview frame original
     annotated_frame_ready = pyqtSignal(bytes)    # JPEG preview con landmarks/ROI
     gradcam_ready         = pyqtSignal(bytes)    # JPEG heatmap Grad-CAM (si está activo)
+    shap_ready            = pyqtSignal(bytes)    # JPEG heatmap SHAP (si está activo)
     progress              = pyqtSignal(int, int)  # (frame_actual, total_frames)
     sequence_result       = pyqtSignal(object)    # InferenceResult
     finished_processing   = pyqtSignal(int)       # total secuencias procesadas
@@ -89,6 +90,7 @@ class VideoPipeline(QThread):
         self._preview_every   = preview_every
         self._stop_flag       = False
         self._gradcam_enabled = False
+        self._shap_enabled    = False
         self._ir_mode         = False
 
     # ── API pública ────────────────────────────────
@@ -96,6 +98,10 @@ class VideoPipeline(QThread):
     def enable_gradcam(self, enabled: bool) -> None:
         """Activa o desactiva la generación de heatmaps Grad-CAM tras cada predicción."""
         self._gradcam_enabled = enabled
+
+    def enable_shap(self, enabled: bool) -> None:
+        """Activa o desactiva la generación de heatmaps SHAP tras cada predicción."""
+        self._shap_enabled = enabled
 
     def enable_ir(self, enabled: bool) -> None:
         """Activa el filtro IR (gamma + CLAHE + blur) para vídeos de cámara infrarroja."""
@@ -232,6 +238,22 @@ class VideoPipeline(QThread):
                                             self.gradcam_ready.emit(bytes(buf))
                                 except Exception:
                                     pass  # GradCAM no bloquea el pipeline
+
+                            # ── SHAP (opcional) ───────────────────────────
+                            if self._shap_enabled:
+                                try:
+                                    shap_map = self._engine.compute_shap(
+                                        seq_array, result=result, out_size=(224, 224)
+                                    )
+                                    if shap_map is not None:
+                                        ok_enc, buf = cv2.imencode(
+                                            ".jpg", shap_map,
+                                            [cv2.IMWRITE_JPEG_QUALITY, 90]
+                                        )
+                                        if ok_enc:
+                                            self.shap_ready.emit(bytes(buf))
+                                except Exception:
+                                    pass  # SHAP no bloquea el pipeline
 
                         except Exception as exc:
                             self.error.emit(f"Error en inferencia: {exc}")

@@ -149,6 +149,18 @@ class AnalysisScreen(QWidget):
         )
         ctrl_bar.addWidget(self._chk_ir)
 
+        self._chk_shap = QCheckBox("🔷 SHAP")
+        self._chk_shap.setStyleSheet(
+            f"color: {_TEXT}; font-size: 12px; padding-left: 4px;"
+        )
+        self._chk_shap.setToolTip(
+            "Activa las atribuciones SHAP (GradientSHAP / Integrated Gradients):\n"
+            "muestra qué regiones del flujo óptico influyeron más en la predicción.\n"
+            "Colormap PLASMA (distinto al JET de Grad-CAM).\n"
+            "Agrega ≈ 1-3 seg extra por secuencia."
+        )
+        ctrl_bar.addWidget(self._chk_shap)
+
         root.addLayout(ctrl_bar)
 
         # ── Separador ─────────────────────────────────────────────────────
@@ -309,6 +321,27 @@ class AnalysisScreen(QWidget):
         )
         vbox.addWidget(self._gradcam_lbl)
 
+        # ── Mini-panel SHAP ────────────────────────────────────
+        sep_shap = QFrame()
+        sep_shap.setFrameShape(QFrame.Shape.HLine)
+        sep_shap.setStyleSheet("color: #333;")
+        vbox.addWidget(sep_shap)
+
+        lbl_shap_title = QLabel("🔷 SHAP (Integrated Gradients)")
+        lbl_shap_title.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px; font-weight: bold;")
+        vbox.addWidget(lbl_shap_title)
+
+        self._shap_lbl = QLabel("Activa SHAP para ver las atribuciones")
+        self._shap_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._shap_lbl.setStyleSheet(
+            "background: #111; border-radius: 6px; color: #555; font-size: 10px;"
+        )
+        self._shap_lbl.setFixedHeight(120)
+        self._shap_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        vbox.addWidget(self._shap_lbl)
+
         return panel
 
     def _rebuild_bars(self, emotions_es: list[str]) -> None:
@@ -405,10 +438,13 @@ class AnalysisScreen(QWidget):
         self._pipeline.finished_processing.connect(self._on_finished)
         self._pipeline.error.connect(self._on_pipeline_error)
         self._pipeline.gradcam_ready.connect(self._on_gradcam_frame)
+        self._pipeline.shap_ready.connect(self._on_shap_frame)
         if self._chk_gradcam.isChecked():
             self._pipeline.enable_gradcam(True)
         if self._chk_ir.isChecked():
             self._pipeline.enable_ir(True)
+        if self._chk_shap.isChecked():
+            self._pipeline.enable_shap(True)
         self._pipeline.start()
 
         self._btn_select.setEnabled(False)
@@ -474,6 +510,19 @@ class AnalysisScreen(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._gradcam_lbl.setPixmap(scaled)
+
+    @pyqtSlot(bytes)
+    def _on_shap_frame(self, jpeg_bytes: bytes) -> None:
+        image = QImage.fromData(jpeg_bytes, "JPEG")
+        if image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image)
+        scaled = pixmap.scaled(
+            self._shap_lbl.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._shap_lbl.setPixmap(scaled)
 
     @pyqtSlot(int, int)
     def _on_progress(self, current: int, total: int) -> None:

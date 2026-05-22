@@ -386,6 +386,7 @@ class InferenceEngine:
         self._label_map: dict[str, int]            = {}
         self._idx_map:   dict[int, str]            = {}
         self._gradcam                              = None  # GradCAMExtractor (lazy)
+        self._shap                                 = None  # SHAPExplainer (lazy)
 
         self._transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -467,6 +468,54 @@ class InferenceEngine:
 
         try:
             return self._gradcam.compute(tensor, class_idx, out_size)
+        except Exception:
+            return None
+
+    def compute_shap(
+        self,
+        flow_sequence: np.ndarray,
+        result: Optional["InferenceResult"] = None,
+        out_size: tuple[int, int] = (64, 64),
+        n_steps: int = 15,
+    ) -> Optional[np.ndarray]:
+        """
+        Genera un heatmap GradientSHAP / Integrated Gradients para la secuencia dada.
+
+        Usa la librería `shap` si está instalada; de lo contrario aplica
+        Integrated Gradients directamente (mismo concepto, sin dependencia extra).
+
+        Args:
+            flow_sequence: (N, H, W, 3) float32 — igual que predict().
+            result:        InferenceResult previo (para reutilizar class_idx).
+                           Si es None, hace un forward adicional para inferirlo.
+            out_size:      (ancho, alto) del heatmap resultante.
+            n_steps:       pasos de integración (solo para el fallback IG).
+
+        Returns:
+            np.ndarray (out_size[1], out_size[0], 3) BGR uint8, o None en error.
+        """
+        if not self.is_ready:
+            return None
+
+        # Inicializar el extractor solo la primera vez
+        if self._shap is None:
+            try:
+                from app.inference.explainability import SHAPExplainer
+                self._shap = SHAPExplainer(self._model)
+            except Exception:
+                return None
+
+        tensor = self._preprocess(flow_sequence)
+
+        if result is not None:
+            class_idx = self._label_map.get(result.raw_label, 0)
+        else:
+            with torch.no_grad():
+                logits = self._model(tensor)
+            class_idx = int(torch.argmax(logits, dim=1).item())
+
+        try:
+            return self._shap.compute(tensor, class_idx, out_size, n_steps)
         except Exception:
             return None
 

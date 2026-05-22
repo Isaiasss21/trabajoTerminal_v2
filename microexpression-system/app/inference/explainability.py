@@ -141,3 +141,149 @@ class GradCAMExtractor:
         for h in self._handles:
             h.remove()
         self._handles.clear()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHAP EXPLAINER
+# GradientSHAP (Expected Gradients) para FlowClassifier.
+# Usa la librería `shap` si está instalada; si no, implementa Integrated
+# Gradients directamente (mismo concepto matemático, sin dependencia externa).
+#
+# Referencia:
+#   Lundberg & Lee, "A Unified Approach to Interpreting Model Predictions",
+#   NeurIPS 2017.
+#   Sundararajan et al., "Axiomatic Attribution for Deep Networks",
+#   ICML 2017 (Integrated Gradients).
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class _SHAPModelWrapper(nn.Module):
+    """
+    Envuelve FlowClassifier para que SHAP solo vea la firma `forward(x)`.
+    Evita problemas con el argumento opcional `dann_lambda`.
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self._inner = model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        return self._inner(x)
+
+
+class SHAPExplainer:
+    """
+    GradientSHAP / Integrated Gradients sobre FlowClassifier.
+
+    Genera un mapa de calor que indica qué píxeles del flujo óptico
+    (promediado temporalmente) contribuyeron más a la predicción.
+
+    Usa `shap.GradientExplainer` si la librería está disponible.
+    Cae de vuelta a Integrated Gradients manual si `shap` no está instalado.
+
+    El colormap resultante es COLORMAP_PLASMA (distinto al JET de Grad-CAM)
+    para distinguirlos visualmente.
+
+    Uso:
+        explainer = SHAPExplainer(model)
+        heatmap   = explainer.compute(tensor, class_idx, out_size=(224, 224))
+        # heatmap → np.ndarray (H, W, 3) BGR uint8
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        self._model   = model
+        self._wrapper = _SHAPModelWrapper(model)
+
+    # ── API pública ────────────────────────────────────────────────────────
+
+    def compute(
+        self,
+        tensor:    torch.Tensor,
+        class_idx: int,
+        out_size:  tuple[int, int] = (64, 64),
+        n_steps:   int = 15,
+    ) -> np.ndarray:
+        """
+        Calcula el mapa de atribución SHAP para la clase indicada.
+
+        Args:
+            tensor:    (1, T, 3, 224, 224) — tensor preprocesado por InferenceEngine.
+            class_idx: índice de la clase a explicar.
+            out_size:  (ancho, alto) del heatmap de salida.
+            n_steps:   pasos de integración (15 es un buen equilibrio velocidad/calidad).
+
+        Returns:
+            heatmap BGR uint8 de forma (out_size[1], out_size[0], 3).
+        """
+        try:
+            return self._compute_shap_lib(tensor, class_idx, out_size)
+        except ImportError:
+            # shap no instalado → usar Integrated Gradients manual
+            return self._compute_integrated_gradients(tensor, class_idx, out_size, n_steps)
+        except Exception:
+            # Cualquier otro fallo en shap → fallback a IG
+            return self._compute_integrated_gradients(tensor, class_idx, out_size, n_steps)
+
+    # ── Métodos internos ───────────────────────────────────────────────────
+
+    def _compute_shap_lib(
+        self,
+        tensor:    torch.Tensor,
+        class_idx: int,
+        out_size:  tuple[int, int],
+    ) -> np.ndarray:
+        """GradientSHAP usando la librería `shap`."""
+        import shap  # type: ignore
+
+        background = torch.zeros_like(tensor)
+        # local_smoothing=0 → sin suavizado adicional (más fiel a las activaciones)
+        explainer   = shap.GradientExplainer(self._wrapper, background, local_smoothing=0)
+        shap_values = explainer.shap_values(tensor)  # list[ndarray (1, T, C, H, W)]
+
+        sv = np.array(shap_values[class_idx])   # (1, T, C, H, W)
+        return self._render(sv[0], out_size)     # (T, C, H, W) → heatmap
+
+    def _compute_integrated_gradients(
+        self,
+        tensor:    torch.Tensor,
+        class_idx: int,
+        out_size:  tuple[int, int],
+        n_steps:   int,
+    ) -> np.ndarray:
+        """
+        Integrated Gradients con baseline cero.
+        Matemáticamente equivalente a GradientSHAP con una sola baseline.
+        """
+        baseline    = torch.zeros_like(tensor)
+        grads_accum = torch.zeros_like(tensor)
+
+        self._model.eval()
+        alphas = torch.linspace(0.0, 1.0, n_steps + 1, device=tensor.device)[1:]
+        for alpha in alphas:
+            x_interp = (baseline + alpha * (tensor - baseline)).detach().requires_grad_(True)
+            logits   = self._wrapper(x_interp)
+            self._wrapper.zero_grad()
+            logits[0, class_idx].backward()
+            if x_interp.grad is not None:
+                grads_accum += x_interp.grad.detach()
+
+        ig = (grads_accum / n_steps) * (tensor - baseline)  # (1, T, C, H, W)
+        return self._render(ig[0].cpu().numpy(), out_size)
+
+    def _render(self, attrs: np.ndarray, out_size: tuple[int, int]) -> np.ndarray:
+        """
+        (T, C, H, W) → heatmap BGR uint8.
+
+        Suma el valor absoluto de las atribuciones sobre el eje temporal
+        y de canal para obtener un mapa espacial 2-D, luego lo colorea.
+        """
+        # attrs: (T, C, H, W)
+        agg = np.abs(attrs).mean(axis=(0, 1))   # promedio |attr| sobre T y C → (H, W)
+        vmin, vmax = float(agg.min()), float(agg.max())
+        if vmax > vmin:
+            agg = (agg - vmin) / (vmax - vmin)
+
+        resized = cv2.resize(agg, out_size)
+        u8 = (resized * 255).clip(0, 255).astype(np.uint8)
+        # PLASMA distingue visualmente de GradCAM (que usa JET)
+        return cv2.applyColorMap(u8, cv2.COLORMAP_PLASMA)
