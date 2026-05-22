@@ -385,6 +385,7 @@ class InferenceEngine:
         self._model:     Optional[_FlowClassifier] = None
         self._label_map: dict[str, int]            = {}
         self._idx_map:   dict[int, str]            = {}
+        self._gradcam                              = None  # GradCAMExtractor (lazy)
 
         self._transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -421,6 +422,53 @@ class InferenceEngine:
             raise RuntimeError("El modelo no está cargado. Verifica la ruta del checkpoint.")
         tensor = self._preprocess(flow_sequence)
         return self._run_inference(tensor)
+
+    def compute_gradcam(
+        self,
+        flow_sequence: np.ndarray,
+        result: Optional["InferenceResult"] = None,
+        out_size: tuple[int, int] = (64, 64),
+    ) -> Optional[np.ndarray]:
+        """
+        Genera un heatmap Grad-CAM para la secuencia de flujo dada.
+
+        Args:
+            flow_sequence: (N, H, W, 3) float32 — igual que predict()
+            result:        InferenceResult previo (para reutilizar class_idx).
+                           Si es None, se hace un forward adicional para inferirlo.
+            out_size:      (ancho, alto) del heatmap resultante.
+
+        Returns:
+            np.ndarray (out_size[1], out_size[0], 3) BGR uint8, o None si el
+            modelo no es compatible (ej. DenseNet) o hay cualquier error.
+        """
+        if not self.is_ready:
+            return None
+        if not (hasattr(self._model, "backbone") and self._model.backbone is not None):
+            return None  # DenseNet no tiene layer4 accesible
+
+        # Inicializar el extractor solo la primera vez
+        if self._gradcam is None:
+            try:
+                from app.inference.explainability import GradCAMExtractor
+                self._gradcam = GradCAMExtractor(self._model)
+            except Exception:
+                return None
+
+        tensor = self._preprocess(flow_sequence)
+
+        # Obtener class_idx desde el resultado previo o por forward pass
+        if result is not None:
+            class_idx = self._label_map.get(result.raw_label, 0)
+        else:
+            with torch.no_grad():
+                logits = self._model(tensor)
+            class_idx = int(torch.argmax(logits, dim=1).item())
+
+        try:
+            return self._gradcam.compute(tensor, class_idx, out_size)
+        except Exception:
+            return None
 
     def predict_tta(self, flow_sequence: np.ndarray, passes: int = 4) -> InferenceResult:
         """

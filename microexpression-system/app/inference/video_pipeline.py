@@ -64,6 +64,7 @@ class VideoPipeline(QThread):
 
     frame_ready           = pyqtSignal(bytes)    # JPEG preview frame original
     annotated_frame_ready = pyqtSignal(bytes)    # JPEG preview con landmarks/ROI
+    gradcam_ready         = pyqtSignal(bytes)    # JPEG heatmap Grad-CAM (si está activo)
     progress              = pyqtSignal(int, int)  # (frame_actual, total_frames)
     sequence_result       = pyqtSignal(object)    # InferenceResult
     finished_processing   = pyqtSignal(int)       # total secuencias procesadas
@@ -85,8 +86,13 @@ class VideoPipeline(QThread):
         self._sequence_length = sequence_length
         self._preview_every   = preview_every
         self._stop_flag       = False
+        self._gradcam_enabled = False
 
-    # ── API pública ───────────────────────────────────────────────────────
+    # ── API pública ───────────────────────────────────────────────
+
+    def enable_gradcam(self, enabled: bool) -> None:
+        """Activa o desactiva la generación de heatmaps Grad-CAM tras cada predicción."""
+        self._gradcam_enabled = enabled
 
     def stop(self) -> None:
         """Solicita la detención del procesamiento y espera hasta 5 s."""
@@ -195,6 +201,23 @@ class VideoPipeline(QThread):
                             result = self._engine.predict(seq_array)
                             self.sequence_result.emit(result)
                             seq_count += 1
+
+                            # ── Grad-CAM (opcional) ───────────────────────
+                            if self._gradcam_enabled:
+                                try:
+                                    heatmap = self._engine.compute_gradcam(
+                                        seq_array, result=result, out_size=(224, 224)
+                                    )
+                                    if heatmap is not None:
+                                        ok_enc, buf = cv2.imencode(
+                                            ".jpg", heatmap,
+                                            [cv2.IMWRITE_JPEG_QUALITY, 90]
+                                        )
+                                        if ok_enc:
+                                            self.gradcam_ready.emit(bytes(buf))
+                                except Exception:
+                                    pass  # GradCAM no bloquea el pipeline
+
                         except Exception as exc:
                             self.error.emit(f"Error en inferencia: {exc}")
 

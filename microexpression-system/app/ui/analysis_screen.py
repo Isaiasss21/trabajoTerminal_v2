@@ -30,7 +30,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QSizePolicy, QProgressBar, QFileDialog,
+    QFrame, QSizePolicy, QProgressBar, QFileDialog, QCheckBox,
 )
 
 from app.inference.inference_engine import InferenceEngine, InferenceResult, EMOTION_COLORS
@@ -127,6 +127,16 @@ class AnalysisScreen(QWidget):
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._cancel_analysis)
         ctrl_bar.addWidget(self._btn_stop)
+
+        self._chk_gradcam = QCheckBox("🔥 Grad-CAM")
+        self._chk_gradcam.setStyleSheet(
+            f"color: {_TEXT}; font-size: 12px; padding-left: 4px;"
+        )
+        self._chk_gradcam.setToolTip(
+            "Activa la explicabilidad Grad-CAM: muestra qué regiones del flujo óptico"
+            " activaron más la predicción (agrega un paso extra por sección)."
+        )
+        ctrl_bar.addWidget(self._chk_gradcam)
 
         root.addLayout(ctrl_bar)
 
@@ -258,6 +268,28 @@ class AnalysisScreen(QWidget):
             self._pct_labels[emo] = pct_lbl
 
         vbox.addStretch()
+
+        # ── Mini-panel Grad-CAM ─────────────────────────────────
+        sep_gcam = QFrame()
+        sep_gcam.setFrameShape(QFrame.Shape.HLine)
+        sep_gcam.setStyleSheet("color: #333;")
+        vbox.addWidget(sep_gcam)
+
+        lbl_gcam_title = QLabel("🔥 Grad-CAM (flujo óptico)")
+        lbl_gcam_title.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px; font-weight: bold;")
+        vbox.addWidget(lbl_gcam_title)
+
+        self._gradcam_lbl = QLabel("Activa Grad-CAM para ver el mapa de calor")
+        self._gradcam_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._gradcam_lbl.setStyleSheet(
+            "background: #111; border-radius: 6px; color: #555; font-size: 10px;"
+        )
+        self._gradcam_lbl.setFixedHeight(160)
+        self._gradcam_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        vbox.addWidget(self._gradcam_lbl)
+
         return panel
 
     # ── Selección de video ────────────────────────────────────────────────
@@ -302,6 +334,9 @@ class AnalysisScreen(QWidget):
         self._pipeline.sequence_result.connect(self._on_sequence_result)
         self._pipeline.finished_processing.connect(self._on_finished)
         self._pipeline.error.connect(self._on_pipeline_error)
+        self._pipeline.gradcam_ready.connect(self._on_gradcam_frame)
+        if self._chk_gradcam.isChecked():
+            self._pipeline.enable_gradcam(True)
         self._pipeline.start()
 
         self._btn_select.setEnabled(False)
@@ -354,6 +389,19 @@ class AnalysisScreen(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._annotated_label.setPixmap(scaled)
+
+    @pyqtSlot(bytes)
+    def _on_gradcam_frame(self, jpeg_bytes: bytes) -> None:
+        image = QImage.fromData(jpeg_bytes, "JPEG")
+        if image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image)
+        scaled = pixmap.scaled(
+            self._gradcam_lbl.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._gradcam_lbl.setPixmap(scaled)
 
     @pyqtSlot(int, int)
     def _on_progress(self, current: int, total: int) -> None:
