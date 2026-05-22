@@ -75,6 +75,7 @@ Las dependencias instalan automáticamente:
 - `opencv-python` — captura de cámara y flujo óptico
 - `mediapipe` — detección de landmarks faciales
 - `numpy`, `Pillow`, `matplotlib`, `pandas`
+- `shap` — explicabilidad XAI (GradientSHAP / Integrated Gradients)
 
 > **Nota PyTorch CPU vs GPU:** El comando anterior instala PyTorch en versión CPU.  
 > Si tienes GPU NVIDIA y quieres aceleración, instala PyTorch con CUDA siguiendo la [guía oficial de PyTorch](https://pytorch.org/get-started/locally/).
@@ -113,15 +114,20 @@ La aplicación tiene 4 pantallas accesibles desde el panel lateral izquierdo.
 2. Haz clic en **"▶ Iniciar"** para comenzar la sesión.
 3. Coloca tu rostro frente a la cámara — aparecerá el indicador **"⬤ Cara detectada"** en verde.
 4. El panel derecho muestra en tiempo real:
-   - **Emoción detectada** (Alegría, Asco, Enojo, Miedo, Neutral, Sorpresa, Tristeza)
+   - **Emoción detectada** (Alegría, Asco, Neutral, Sorpresa, Tristeza)
    - **Confianza** de la predicción (%)
    - **Barras de distribución** con la probabilidad de cada emoción
    - Indicador de validez (✔ válida / ⚠ incierta / ✘ baja confianza)
-5. Haz clic en **"■ Detener"** para finalizar la sesión.
+5. Activa los mapas de explicabilidad con los checkboxes superiores:
+   - **🔥 Grad-CAM** — resalta las regiones del flujo óptico que más influyeron en la decisión (colormap JET)
+   - **🔷 SHAP** — muestra las atribuciones pixel-a-pixel de importancia (colormap PLASMA)
+6. Haz clic en **"■ Detener"** para finalizar la sesión.
    - La app navega automáticamente a la pantalla de **Resultados**.
 
 > **¿Por qué siempre aparece "Neutral"?**  
 > En reposo, sin microexpresiones activas, el modelo correctamente predice "Neutral". Para obtener predicciones de otras emociones, realiza expresiones faciales visibles aunque sean breves (cejas levantadas, fruncir el ceño, etc.).
+
+> **Nota SHAP:** El cálculo de atribuciones SHAP es un poco más lento que Grad-CAM porque integra gradientes a lo largo de una trayectoria (15 pasos). En CPU puede añadir ~0.3-0.5 s por secuencia.
 
 ### 📊 Resultados
 
@@ -164,7 +170,58 @@ Cada fila representa una predicción individual durante la sesión:
 
 ---
 
-## 5. Solución de problemas frecuentes
+## 5. Explicabilidad XAI: Grad-CAM y SHAP
+
+El sistema implementa dos técnicas complementarias de inteligencia artificial explicable (XAI) para visualizar **por qué** el modelo predice una emoción determinada.
+
+### 🔥 Grad-CAM (Gradient-weighted Class Activation Mapping)
+
+Grad-CAM resalta las **regiones espaciales** del flujo óptico que más activaron la red neuronal para la clase predicha.
+
+**¿Cómo funciona?**
+1. Se registran hooks en la última capa convolucional del backbone ResNet18 (`layer4`).
+2. Se hace un forward pass con la secuencia de 15 frames.
+3. Se calcula el gradiente de la clase predicha respecto a los mapas de activación.
+4. Los gradientes se promedian por canal (Global Average Pooling) → produce un peso por canal.
+5. Se combina linealmente (peso × activación) + ReLU → mapa de calor 7×7.
+6. Se promedia sobre los 15 frames temporales y se escala al tamaño del rostro.
+7. Se colorea con **COLORMAP_JET** (azul=poco, rojo=mucho).
+
+**Referencia:** Selvaraju et al., *Grad-CAM*, ICCV 2017.
+
+---
+
+### 🔷 SHAP (SHapley Additive exPlanations)
+
+SHAP calcula la **contribución de cada píxel** a la predicción usando el concepto matemático de valores de Shapley de teoría de juegos. En esta implementación se usa **GradientSHAP / Integrated Gradients**.
+
+**¿Cómo funciona?**
+1. Se define una **baseline** (tensor de ceros = "imagen nula", equivale a la ausencia de información).
+2. Se genera una trayectoria de interpolaciones entre la baseline y la entrada real: $x_\alpha = \alpha \cdot x_{\text{real}}$, con $\alpha \in [0, 1]$ en 15 pasos.
+3. En cada punto de la trayectoria se calcula el gradiente de la clase predicha respecto a los píxeles.
+4. Las atribuciones finales son:  
+   $$\text{IG}(x) = (x - x_{\text{baseline}}) \times \frac{1}{n} \sum_{k=1}^{n} \nabla_x F(x_{\alpha_k})$$
+5. Se promedian las atribuciones sobre los 15 frames y los 3 canales → mapa espacial 2-D.
+6. Se colorea con **COLORMAP_PLASMA** (negro=neutro, amarillo=alto impacto).
+
+**Si `shap` está instalado:** usa `shap.GradientExplainer` (más eficiente, mismo concepto).  
+**Si `shap` no está instalado:** cae automáticamente a la implementación propia de Integrated Gradients.
+
+**Referencia:** Lundberg & Lee, *A Unified Approach to Interpreting Model Predictions*, NeurIPS 2017.
+
+### Diferencia visual entre ambas técnicas
+
+| Característica | 🔥 Grad-CAM | 🔷 SHAP / IG |
+|---|---|---|
+| Colormap | JET (azul→rojo) | PLASMA (negro→amarillo) |
+| Resolución | Regional (7×7 escalado) | Pixel-a-pixel (224×224) |
+| Velocidad | Muy rápido (1 backward) | Moderado (15 pasos IG) |
+| Qué muestra | Regiones de activación | Atribución por píxel |
+| Baseline | No aplica | Tensor cero (sin señal) |
+
+---
+
+## 6. Solución de problemas frecuentes
 
 ### La app no encuentra la cámara
 - Verifica que la webcam esté conectada **antes** de iniciar la sesión.
@@ -191,9 +248,18 @@ pip install PyQt6
 - El indicador dice **"Sin cara"** — el modelo de landmarks no detecta rostro. Asegúrate de tener buena iluminación y de estar frente a la cámara.
 - Revisa que `models/face_landmarker.task` exista en la carpeta `models/`.
 
+### El mapa SHAP no aparece o tarda mucho
+- Asegúrate de que `shap` esté instalado: `pip install shap>=0.44.0`.
+- Si no está instalado, la app usa automáticamente Integrated Gradients internos (mismo resultado visual, sin dependencia).
+- En CPU el cálculo toma ~0.3-0.5 s por secuencia, es normal.
+
+### Grad-CAM muestra solo azul (sin activación)
+- Ocurre cuando el modelo no tiene suficiente flujo óptico en la secuencia (movimiento muy leve o cámara quieta).
+- Prueba realizando una expresión facial más marcada.
+
 ---
 
-## 6. Estructura del proyecto
+## 7. Estructura del proyecto
 
 ```
 microexpression-system/
@@ -201,20 +267,23 @@ microexpression-system/
 │   ├── main.py                    ← punto de entrada
 │   ├── inference/
 │   │   ├── inference_engine.py    ← carga del modelo y predicciones
-│   │   └── camera_pipeline.py     ← captura de cámara y flujo óptico
+│   │   ├── camera_pipeline.py     ← captura de cámara y flujo óptico
+│   │   ├── video_pipeline.py      ← análisis de video pre-grabado
+│   │   └── explainability.py      ← Grad-CAM + SHAP/Integrated Gradients
 │   ├── storage/
 │   │   └── session_manager.py     ← guardado de sesiones
 │   ├── analytics/
 │   │   └── stats_engine.py        ← cálculo de estadísticas
 │   └── ui/
 │       ├── main_window.py         ← ventana principal
-│       ├── analysis_screen.py     ← pantalla de análisis
+│       ├── analysis_screen.py     ← pantalla de análisis (con controles XAI)
 │       ├── results_screen.py      ← pantalla de resultados
 │       ├── history_screen.py      ← pantalla de historial
 │       └── settings_screen.py     ← pantalla de ajustes
 ├── models/
 │   ├── face_landmarker.task       ← modelo MediaPipe (incluido)
-│   └── best_resnet18_flow.pth     ← modelo entrenado (proveer manualmente)
+│   ├── best_resnet18_flow.pth     ← modelo entrenado (proveer manualmente)
+│   └── best_resnet18_flow.json    ← label map del modelo
 ├── data/                          ← creado automáticamente al ejecutar
 │   ├── sessions/                  ← sesiones guardadas
 │   └── exports/                   ← CSVs exportados
