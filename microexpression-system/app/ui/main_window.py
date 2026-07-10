@@ -23,32 +23,24 @@ from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QIcon, QFont, QPalette, QColor
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QStackedWidget, QPushButton, QLabel, QFrame, QSizePolicy,
+    QStackedWidget, QPushButton, QLabel, QFrame, QSizePolicy, QStyle,
+    QMessageBox,
 )
 
 from app.ui.analysis_screen import AnalysisScreen
 from app.ui.results_screen import ResultsScreen
 from app.ui.history_screen import HistoryScreen
 from app.ui.settings_screen import SettingsScreen
+from app.ui.theme import Theme, ThemeManager, DARK
 from app.storage.session_manager import SessionManager
 from app.inference.inference_engine import InferenceEngine
 
 
-# ── Colores del tema oscuro ───────────────────────────────────────────────────
-
-_BG        = "#121212"
-_SURFACE   = "#1E1E1E"
-_SIDEBAR   = "#1A1A1A"
-_ACCENT    = "#2979FF"
-_ACCENT_H  = "#5499FF"
-_TEXT      = "#E0E0E0"
-_SUBTEXT   = "#9E9E9E"
-_DIVIDER   = "#2A2A2A"
-
-_SIDEBAR_BTN_STYLE = """
+def _mk_sidebar_btn_style(theme: Theme) -> str:
+    return f"""
 QPushButton {{
     background: transparent;
-    color: {text};
+    color: {theme.text};
     border: none;
     border-left: 3px solid transparent;
     padding: 12px 16px;
@@ -57,30 +49,33 @@ QPushButton {{
     border-radius: 0px;
 }}
 QPushButton:hover {{
-    background: rgba(255,255,255,0.05);
-    border-left: 3px solid {accent_h};
-    color: {text};
+    background: {theme.sidebar_hover_bg};
+    border-left: 3px solid {theme.accent_h};
+    color: {theme.text};
 }}
 QPushButton[active="true"] {{
-    background: rgba(41,121,255,0.15);
-    border-left: 3px solid {accent};
-    color: {accent};
+    background: {theme.accent_alpha};
+    border-left: 3px solid {theme.accent};
+    color: {theme.accent};
     font-weight: bold;
 }}
-""".format(text=_TEXT, accent=_ACCENT, accent_h=_ACCENT_H)
+"""
 
 
 class _SidebarButton(QPushButton):
     """Botón del sidebar con estado activo/inactivo."""
 
-    def __init__(self, text: str, icon_char: str = "", parent=None) -> None:
-        super().__init__(f"  {icon_char}  {text}" if icon_char else text, parent)
-        self.setStyleSheet(_SIDEBAR_BTN_STYLE)
+    def __init__(self, text: str, style: str = "", icon: Optional[QIcon] = None, parent=None) -> None:
+        super().__init__(f" {text}", parent)
+        self.setStyleSheet(style)
         self.setCheckable(False)
         self.setProperty("active", False)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(48)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        if icon:
+            self.setIcon(icon)
+            self.setIconSize(QSize(16, 16))
 
     def set_active(self, active: bool) -> None:
         self.setProperty("active", active)
@@ -115,73 +110,79 @@ class MainWindow(QMainWindow):
         self._engine          = InferenceEngine(model_path or "", device="auto")
 
         # ── Layout raíz ───────────────────────────────────────────────────
-        root = QWidget()
-        root.setObjectName("rootWidget")
-        root.setStyleSheet(f"#rootWidget {{ background: {_BG}; }}")
-        self.setCentralWidget(root)
+        t = ThemeManager.current()
 
-        layout = QHBoxLayout(root)
+        self._root_widget = QWidget()
+        self._root_widget.setObjectName("rootWidget")
+        self._root_widget.setStyleSheet(f"#rootWidget {{ background: {t.bg}; }}")
+        self.setCentralWidget(self._root_widget)
+
+        layout = QHBoxLayout(self._root_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         # ── Sidebar ───────────────────────────────────────────────────────
-        sidebar = self._build_sidebar()
-        layout.addWidget(sidebar)
+        self._sidebar_widget = self._build_sidebar(t)
+        layout.addWidget(self._sidebar_widget)
 
         # ── Separador vertical ────────────────────────────────────────────
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet(f"color: {_DIVIDER};")
-        sep.setFixedWidth(1)
-        layout.addWidget(sep)
+        self._sep_vline = QFrame()
+        self._sep_vline.setFrameShape(QFrame.Shape.VLine)
+        self._sep_vline.setStyleSheet(f"color: {t.divider};")
+        self._sep_vline.setFixedWidth(1)
+        layout.addWidget(self._sep_vline)
 
         # ── Stack de pantallas ────────────────────────────────────────────
         self._stack = QStackedWidget()
-        self._stack.setStyleSheet(f"background: {_BG};")
+        self._stack.setStyleSheet(f"background: {t.bg};")
         layout.addWidget(self._stack, stretch=1)
 
         self._build_screens()
         self._navigate(0)  # pantalla inicial: Análisis
 
+        # ── Registrar cambios de tema ─────────────────────────────────────
+        ThemeManager.on_change(self.apply_theme)
+
     # ── Construcción del sidebar ──────────────────────────────────────────
 
-    def _build_sidebar(self) -> QWidget:
+    def _build_sidebar(self, theme: Theme) -> QWidget:
         sidebar = QWidget()
         sidebar.setFixedWidth(210)
-        sidebar.setStyleSheet(f"background: {_SIDEBAR};")
+        sidebar.setStyleSheet(f"background: {theme.sidebar};")
 
         vbox = QVBoxLayout(sidebar)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
 
         # Título / logo
-        title = QLabel("MicroExp\nAnalyzer")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet(f"""
-            color: {_ACCENT};
+        self._lbl_logo = QLabel("ZILU\nMicroExp\nAnalyzer")
+        self._lbl_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_logo.setStyleSheet(f"""
+            color: {theme.accent};
             font-size: 16px;
             font-weight: bold;
             padding: 24px 8px 20px 8px;
         """)
-        vbox.addWidget(title)
+        vbox.addWidget(self._lbl_logo)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {_DIVIDER};")
-        vbox.addWidget(sep)
+        self._sep_sidebar = QFrame()
+        self._sep_sidebar.setFrameShape(QFrame.Shape.HLine)
+        self._sep_sidebar.setStyleSheet(f"color: {theme.divider};")
+        vbox.addWidget(self._sep_sidebar)
 
         vbox.addSpacing(8)
 
         # Botones de navegación
+        btn_style = _mk_sidebar_btn_style(theme)
         self._nav_buttons: list[_SidebarButton] = []
         nav_items = [
-            ("Análisis",   "▶"),
-            ("Resultados", "📊"),
-            ("Historial",  "🗂"),
-            ("Ajustes",    "⚙"),
+            ("Análisis",   ),
+            ("Resultados", ),
+            ("Historial",  ),
+            ("Ajustes",    ),
         ]
-        for idx, (label, icon) in enumerate(nav_items):
-            btn = _SidebarButton(label, icon)
+        for idx, (label,) in enumerate(nav_items):
+            btn = _SidebarButton(label, style=btn_style)
             btn.clicked.connect(lambda checked, i=idx: self._navigate(i))
             self._nav_buttons.append(btn)
             vbox.addWidget(btn)
@@ -189,10 +190,10 @@ class MainWindow(QMainWindow):
         vbox.addStretch()
 
         # Versión
-        ver = QLabel("v1.0.0")
-        ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ver.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px; padding: 12px;")
-        vbox.addWidget(ver)
+        self._lbl_version = QLabel("v1.0.0")
+        self._lbl_version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_version.setStyleSheet(f"color: {theme.subtext}; font-size: 11px; padding: 12px;")
+        vbox.addWidget(self._lbl_version)
 
         return sidebar
 
@@ -226,6 +227,43 @@ class MainWindow(QMainWindow):
             btn.set_active(i == index)
         self._stack.setCurrentIndex(index)
 
+    # ── Tema ──────────────────────────────────────────────────────────────
+
+    def apply_theme(self, theme: Theme) -> None:
+        """Aplica el tema a la ventana principal y todas las pantallas."""
+        # Root
+        self._root_widget.setStyleSheet(f"#rootWidget {{ background: {theme.bg}; }}")
+
+        # Sidebar
+        self._sidebar_widget.setStyleSheet(f"background: {theme.sidebar};")
+        self._lbl_logo.setStyleSheet(f"""
+            color: {theme.accent};
+            font-size: 16px;
+            font-weight: bold;
+            padding: 24px 8px 20px 8px;
+        """)
+        self._sep_sidebar.setStyleSheet(f"color: {theme.divider};")
+        self._lbl_version.setStyleSheet(f"color: {theme.subtext}; font-size: 11px; padding: 12px;")
+
+        # Botones de navegación
+        btn_style = _mk_sidebar_btn_style(theme)
+        for btn in self._nav_buttons:
+            btn.setStyleSheet(btn_style)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+        # Separador vertical
+        self._sep_vline.setStyleSheet(f"color: {theme.divider};")
+
+        # Stack bg
+        self._stack.setStyleSheet(f"background: {theme.bg};")
+
+        # Pantallas
+        self._analysis_screen.apply_theme(theme)
+        self._results_screen.apply_theme(theme)
+        self._history_screen.apply_theme(theme)
+        self._settings_screen.apply_theme(theme)
+
     # ── Slots de eventos cross-screen ─────────────────────────────────────
 
     def _on_session_finished(self, session_id: str) -> None:
@@ -241,8 +279,20 @@ class MainWindow(QMainWindow):
 
     def _on_model_changed(self, model_path: str) -> None:
         """Recarga el motor con la nueva ruta de modelo."""
-        self._engine = InferenceEngine(model_path, device="auto")
-        self._analysis_screen.set_engine(self._engine)
+        try:
+            new_engine = InferenceEngine(model_path, device="auto")
+            if not new_engine.is_ready:
+                raise RuntimeError("El modelo no se cargó correctamente (arquitectura no reconocida).")
+            self._engine = new_engine
+            self._analysis_screen.set_engine(self._engine)
+            self._settings_screen.set_engine(self._engine)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Error al cargar modelo",
+                f"No se pudo cargar el modelo:\n{Path(model_path).name}\n\n{exc}",
+            )
+            self._settings_screen.set_engine(self._engine)
 
     # ── Cierre limpio ─────────────────────────────────────────────────────
 

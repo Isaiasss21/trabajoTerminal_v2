@@ -93,8 +93,13 @@ def main() -> int:  # noqa: D103
 
     # Asegurar que el directorio de trabajo sea microexpression-system/
     # para que las rutas relativas (models/, data/) funcionen correctamente.
-    workspace_root = Path(__file__).resolve().parent.parent
+    # Cuando la app está empaquetada como EXE (PyInstaller), sys.frozen es True
+    # y sys.executable apunta al .exe — usamos su carpeta como raíz.
     import os
+    if getattr(sys, "frozen", False):
+        workspace_root = Path(sys.executable).resolve().parent
+    else:
+        workspace_root = Path(__file__).resolve().parent.parent
     os.chdir(workspace_root)
 
     # Estilo base + paleta oscura

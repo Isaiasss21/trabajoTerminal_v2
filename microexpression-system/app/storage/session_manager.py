@@ -45,6 +45,7 @@ class Prediction:
     duration_ms: int          # duración estimada en ms (RB01: 100-500 ms)
     landmarks_detected: bool  # si MediaPipe detectó rostro en ese frame (RB03)
     intensity: float = 0.0    # placeholder; puede calcularse externamente
+    probs: dict = field(default_factory=dict)  # probabilidades de todas las clases
 
     def to_csv_row(self, session_id: str) -> dict:
         return {
@@ -135,6 +136,50 @@ class Session:
         )
         return meta
 
+    def save_xai_frames(
+        self,
+        gradcam_frames: list[tuple[float, str, bytes, bytes]],
+        shap_frames:    list[tuple[float, str, bytes, bytes]],
+    ) -> None:
+        """
+        Persiste frames XAI en disco.
+        Cada lista: [(confidence, emotion, xai_jpeg, face_jpeg), ...] en orden temporal.
+        """
+        xai_dir = self._dir / "xai"
+        xai_dir.mkdir(exist_ok=True)
+
+        meta: dict = {"gradcam": [], "shap": []}
+
+        for i, (conf, emotion, xai_jpeg, face_jpeg) in enumerate(gradcam_frames):
+            xai_fname  = f"gradcam_{i:02d}.jpg"
+            face_fname = f"face_gradcam_{i:02d}.jpg"
+            (xai_dir / xai_fname).write_bytes(xai_jpeg)
+            if face_jpeg:
+                (xai_dir / face_fname).write_bytes(face_jpeg)
+            meta["gradcam"].append({
+                "file": xai_fname,
+                "face_file": face_fname if face_jpeg else None,
+                "confidence": conf,
+                "emotion": emotion,
+            })
+
+        for i, (conf, emotion, xai_jpeg, face_jpeg) in enumerate(shap_frames):
+            xai_fname  = f"shap_{i:02d}.jpg"
+            face_fname = f"face_shap_{i:02d}.jpg"
+            (xai_dir / xai_fname).write_bytes(xai_jpeg)
+            if face_jpeg:
+                (xai_dir / face_fname).write_bytes(face_jpeg)
+            meta["shap"].append({
+                "file": xai_fname,
+                "face_file": face_fname if face_jpeg else None,
+                "confidence": conf,
+                "emotion": emotion,
+            })
+
+        (xai_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
     @property
     def predictions(self) -> list[Prediction]:
         return list(self._predictions)
@@ -207,6 +252,41 @@ class SessionManager:
             return []
         raw = json.loads(pred_path.read_text(encoding="utf-8"))
         return [Prediction(**r) for r in raw]
+
+    def load_xai_frames(self, session_id: str) -> dict:
+        """
+        Carga los frames XAI guardados para una sesión.
+        Returns: {"gradcam": [(conf, emotion, bytes), ...], "shap": [...]}
+        """
+        xai_dir   = self._sessions_dir / session_id / "xai"
+        meta_path = xai_dir / "meta.json"
+        if not meta_path.exists():
+            return {"gradcam": [], "shap": []}
+
+        meta   = json.loads(meta_path.read_text(encoding="utf-8"))
+        result: dict = {"gradcam": [], "shap": []}
+
+        for entry in meta.get("gradcam", []):
+            fpath = xai_dir / entry["file"]
+            if not fpath.exists():
+                continue
+            face_path = entry.get("face_file")
+            face_bytes = (xai_dir / face_path).read_bytes() if face_path and (xai_dir / face_path).exists() else b""
+            result["gradcam"].append(
+                (entry["confidence"], entry["emotion"], fpath.read_bytes(), face_bytes)
+            )
+
+        for entry in meta.get("shap", []):
+            fpath = xai_dir / entry["file"]
+            if not fpath.exists():
+                continue
+            face_path = entry.get("face_file")
+            face_bytes = (xai_dir / face_path).read_bytes() if face_path and (xai_dir / face_path).exists() else b""
+            result["shap"].append(
+                (entry["confidence"], entry["emotion"], fpath.read_bytes(), face_bytes)
+            )
+
+        return result
 
     def delete_session(self, session_id: str) -> bool:
         """Elimina una sesión del disco. Devuelve True si existía."""

@@ -201,6 +201,25 @@ class _GradientReversalLayer(nn.Module):
         return _GradientReversalFunction.apply(x, lambda_)
 
 
+class _TransformerTemporalPool(nn.Module):
+    """Transformer encoder con positional embedding aprendido (B,T,D) → (B,D).
+    Las claves del state_dict se guardan bajo 'lstm_pool.*' para coincidir con
+    checkpoints entrenados con esta convención de nomenclatura."""
+    def __init__(self, dim: int, max_seq_len: int = 128, num_heads: int = 8,
+                 num_layers: int = 1, ffn_dim: int = 1024, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_seq_len, dim))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim, nhead=num_heads, dim_feedforward=ffn_dim,
+            dropout=dropout, batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B,T,D) → (B,D)
+        x = x + self.pos_embed[:, :x.shape[1], :]
+        return self.encoder(x).mean(dim=1)
+
+
 class _FlowClassifier(nn.Module):
     """
     FlowClassifier: backbone (ResNet/DenseNet) + temporal pooling + clasificador.
@@ -217,32 +236,45 @@ class _FlowClassifier(nn.Module):
 
     def __init__(
         self,
-        num_classes:       int,
-        backbone:          str  = "resnet18",
-        use_temporal_attn: bool = False,
-        use_lstm:          bool = False,
-        lstm_hidden:       int  = 128,
-        lstm_layers:       int  = 1,
-        use_gru:           bool = False,
-        gru_hidden:        int  = 256,
-        gru_layers:        int  = 1,
-        use_tcn:           bool = False,
-        tcn_channels:      int  = 256,
-        use_dann:          bool = False,
+        num_classes:             int,
+        backbone:                str  = "resnet18",
+        use_temporal_attn:       bool = False,
+        use_lstm:                bool = False,
+        lstm_hidden:             int  = 128,
+        lstm_layers:             int  = 1,
+        use_gru:                 bool = False,
+        gru_hidden:              int  = 256,
+        gru_layers:              int  = 1,
+        use_tcn:                 bool = False,
+        tcn_channels:            int  = 256,
+        use_dann:                bool = False,
+        use_transformer:         bool = False,
+        transformer_max_seq_len: int  = 128,
+        transformer_num_heads:   int  = 8,
+        transformer_num_layers:  int  = 1,
+        transformer_ffn_dim:     int  = 1024,
+        use_bn_classifier:       bool = False,
+        use_gem_pool:            bool = False,
     ) -> None:
         super().__init__()
         backbone = backbone.lower()
 
         if backbone == "resnet18":
             net = models.resnet18(weights=None)
+            if use_gem_pool:
+                net.avgpool = _GeM()
             net.fc = nn.Identity()
             self.backbone = net
         elif backbone == "resnet34":
             net = models.resnet34(weights=None)
+            if use_gem_pool:
+                net.avgpool = _GeM()
             net.fc = nn.Identity()
             self.backbone = net
         elif backbone == "resnet50":
             net = models.resnet50(weights=None)
+            if use_gem_pool:
+                net.avgpool = _GeM()
             net.fc = nn.Identity()
             self.backbone = net
         elif backbone == "densenet121":
@@ -253,13 +285,14 @@ class _FlowClassifier(nn.Module):
         else:
             raise ValueError(f"Backbone desconocido: '{backbone}'")
 
-        self._backbone_name = backbone
-        self.feature_dim    = self._FEATURE_DIMS[backbone]
+        self._backbone_name  = backbone
+        self.feature_dim     = self._FEATURE_DIMS[backbone]
 
         self.use_temporal_attn = use_temporal_attn
         self.use_lstm          = use_lstm
         self.use_gru           = use_gru
         self.use_tcn           = use_tcn
+        self.use_transformer   = use_transformer
 
         self.temporal_pool: Optional[nn.Module] = None
         self.lstm_pool:     Optional[nn.Module] = None
@@ -270,7 +303,16 @@ class _FlowClassifier(nn.Module):
             self.temporal_pool = _TemporalAttentionPool(
                 dim=self.feature_dim, num_heads=4, dropout=0.1
             )
-        if use_lstm:
+        # Transformer ocupa la clave lstm_pool en el state_dict
+        if use_transformer:
+            self.lstm_pool = _TransformerTemporalPool(
+                dim=self.feature_dim,
+                max_seq_len=transformer_max_seq_len,
+                num_heads=transformer_num_heads,
+                num_layers=transformer_num_layers,
+                ffn_dim=transformer_ffn_dim,
+            )
+        elif use_lstm:
             self.lstm_pool = _LSTMTemporalPool(
                 input_dim=self.feature_dim, hidden_dim=lstm_hidden,
                 num_layers=lstm_layers, dropout=0.6,
@@ -280,8 +322,16 @@ class _FlowClassifier(nn.Module):
                 input_dim=self.feature_dim, channels=tcn_channels, dropout=0.2,
             )
 
+        if use_gru:
+            self.gru_pool = _TemporalGRU(
+                dim=self.feature_dim, hidden=gru_hidden,
+                layers=gru_layers, dropout=0.5,
+            )
+
         if use_lstm:
             head_dim = lstm_hidden * 2
+        elif use_transformer:
+            head_dim = self.feature_dim
         elif use_gru:
             head_dim = gru_hidden * 2
         elif use_tcn:
@@ -289,10 +339,17 @@ class _FlowClassifier(nn.Module):
         else:
             head_dim = self.feature_dim
 
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(head_dim, num_classes),
-        )
+        if use_bn_classifier:
+            self.classifier = nn.Sequential(
+                nn.BatchNorm1d(head_dim),
+                nn.Dropout(0.5),
+                nn.Linear(head_dim, num_classes),
+            )
+        else:
+            self.classifier = nn.Sequential(
+                nn.Dropout(0.5),
+                nn.Linear(head_dim, num_classes),
+            )
 
         self.use_dann = use_dann
         if use_dann:
@@ -320,7 +377,7 @@ class _FlowClassifier(nn.Module):
 
         if self.use_temporal_attn and self.temporal_pool is not None:
             feat = self.temporal_pool(feat)
-        elif self.use_lstm and self.lstm_pool is not None:
+        elif (self.use_lstm or self.use_transformer) and self.lstm_pool is not None:
             feat = self.lstm_pool(feat)
         elif self.use_gru and self.gru_pool is not None:
             feat = self.gru_pool(feat)
@@ -395,7 +452,13 @@ class InferenceEngine:
         ])
 
         if self._model_path.exists():
-            self._load()
+            try:
+                self._load()
+            except Exception as exc:
+                import warnings
+                warnings.warn(
+                    f"[InferenceEngine] No se pudo cargar '{self._model_path.name}': {exc}"
+                )
 
     # ── API pública ────────────────────────────────────────────────────────
 
@@ -562,13 +625,38 @@ class InferenceEngine:
 
         # ── Temporal pooling ─────────────────────────────────────────────────
         use_temporal_attn = any(k.startswith("temporal_pool") for k in keys)
-        use_lstm          = any(k.startswith("lstm_pool")      for k in keys)
+        # Transformer se guarda bajo 'lstm_pool' (detectado por pos_embed)
+        use_transformer   = "lstm_pool.pos_embed" in keys
+        use_lstm          = (any(k.startswith("lstm_pool") for k in keys)
+                             and not use_transformer)
         use_gru           = any(k.startswith("gru_pool")       for k in keys)
         use_tcn           = any(k.startswith("tcn_pool")       for k in keys)
         use_dann          = any(k.startswith("domain_class")   for k in keys)
+        use_gem_pool      = "backbone.avgpool.p" in keys
+
+        # ── Parámetros del Transformer (si aplica) ───────────────────────────
+        transformer_max_seq_len = 128
+        transformer_num_heads   = 8
+        transformer_num_layers  = 1
+        transformer_ffn_dim     = 1024
+        if use_transformer:
+            transformer_max_seq_len = int(state_dict["lstm_pool.pos_embed"].shape[1])
+            transformer_ffn_dim = int(
+                state_dict["lstm_pool.encoder.layers.0.linear1.weight"].shape[0]
+            )
+            layer_indices = {
+                int(k.split(".")[3])
+                for k in keys
+                if k.startswith("lstm_pool.encoder.layers.") and k.split(".")[3].isdigit()
+            }
+            transformer_num_layers = max(layer_indices) + 1 if layer_indices else 1
 
         # ── Número de clases y head_dim desde el clasificador ────────────────
-        head_weight = state_dict["classifier.1.weight"]
+        # Formato antiguo: Dropout+Linear → classifier.1.weight
+        # Formato nuevo:   BN+Dropout+Linear → classifier.2.weight
+        has_bn_classifier   = "classifier.0.running_mean" in keys
+        classifier_w_key    = "classifier.2.weight" if has_bn_classifier else "classifier.1.weight"
+        head_weight = state_dict[classifier_w_key]
         num_classes = int(head_weight.shape[0])
         head_dim    = int(head_weight.shape[1])
 
@@ -586,6 +674,13 @@ class InferenceEngine:
             use_gru=use_gru, gru_hidden=gru_hidden, gru_layers=gru_layers,
             use_tcn=use_tcn, tcn_channels=tcn_channels,
             use_dann=use_dann,
+            use_transformer=use_transformer,
+            transformer_max_seq_len=transformer_max_seq_len,
+            transformer_num_heads=transformer_num_heads,
+            transformer_num_layers=transformer_num_layers,
+            transformer_ffn_dim=transformer_ffn_dim,
+            use_bn_classifier=has_bn_classifier,
+            use_gem_pool=use_gem_pool,
         )
         model.load_state_dict(state_dict, strict=True)
         model.eval()

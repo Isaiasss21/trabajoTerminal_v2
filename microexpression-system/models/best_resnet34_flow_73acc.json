@@ -1,0 +1,10 @@
+{
+  "label_map": {
+    "asco":      0,
+    "felicidad": 1,
+    "neutral":   2,
+    "sorpresa":  3,
+    "tristeza":  4
+  },
+  "note": "5 clases (sin miedo, sin enojo). Orden alfabetico = build_label_map. Neutral incluido via neutral_csv_index (meme_v2_neutral)."
+}

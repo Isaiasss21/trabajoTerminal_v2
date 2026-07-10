@@ -5,9 +5,8 @@ Pantalla de configuración de la aplicación.
 
 Secciones:
   1. Modelo — selector de archivo .pth, estado de carga
-  2. Cámara — selector de índice de cámara disponible
-  3. Consentimiento — checkbox GDPR (RB07: consentimiento informado)
-  4. Acerca de — versión, créditos
+  2. Apariencia — toggle claro / oscuro
+  3. Acerca de — versión, créditos
 
 Señales emitidas al exterior:
   model_changed(str) — ruta del nuevo modelo cuando el usuario lo carga
@@ -18,56 +17,55 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QFileDialog, QCheckBox, QLineEdit,
-    QGroupBox, QFormLayout, QSizePolicy, QScrollArea,
-    QMessageBox,
+    QFrame, QFileDialog, QLineEdit,
+    QGroupBox, QSizePolicy, QScrollArea,
+    QMessageBox, QStyle,
 )
 
 from app.inference.inference_engine import InferenceEngine
 from app.storage.session_manager import SessionManager
-from app.inference.camera_pipeline import get_available_cameras
+from app.ui.theme import Theme, ThemeManager
+
+# ── Colores semánticos fijos ──────────────────────────────────────────────────
+
+_GREEN = "#4CAF50"
+_AMBER = "#FFC107"
+_RED   = "#F44336"
 
 
-# ── Colores ────────────────────────────────────────────────────────────────────
+def _group_style(theme: Theme) -> str:
+    return (
+        f"QGroupBox {{ color:{theme.text}; font-size:14px; font-weight:bold;"
+        f" border:1px solid {theme.divider}; border-radius:8px; margin-top:14px;"
+        f" padding:14px 12px; background:{theme.surface}; }}"
+        f" QGroupBox::title {{ subcontrol-origin: margin; left: 14px; padding: 0 6px; }}"
+    )
 
-_BG      = "#121212"
-_SURFACE = "#1E1E1E"
-_ACCENT  = "#2979FF"
-_TEXT    = "#E0E0E0"
-_SUBTEXT = "#9E9E9E"
-_GREEN   = "#4CAF50"
-_AMBER   = "#FFC107"
-_RED     = "#F44336"
 
-_BTN_ACCENT = (
-    "QPushButton { background:#2979FF; color:#fff; border:none; border-radius:6px; "
-    "padding:8px 18px; font-size:13px; } "
-    "QPushButton:hover { background:#5499FF; }"
-)
-_BTN_NEUTRAL = (
-    "QPushButton { background:#333; color:#E0E0E0; border:none; border-radius:6px; "
-    "padding:8px 18px; font-size:13px; } "
-    "QPushButton:hover { background:#444; }"
-)
-_INPUT_STYLE = (
-    f"QLineEdit {{ background:#252525; color:{_TEXT}; border:1px solid #333;"
-    f" border-radius:5px; padding:6px 10px; font-size:13px; }}"
-)
-_GROUP_STYLE = (
-    f"QGroupBox {{ color:{_TEXT}; font-size:14px; font-weight:bold;"
-    f" border:1px solid #2A2A2A; border-radius:8px; margin-top:14px; padding:14px 12px;"
-    f" background:{_SURFACE}; }}"
-    f" QGroupBox::title {{ subcontrol-origin: margin; left: 14px; padding: 0 6px; }}"
-)
-_CHECKBOX_STYLE = (
-    f"QCheckBox {{ color:{_TEXT}; font-size:13px; }}"
-    f" QCheckBox::indicator {{ width:18px; height:18px; border:2px solid #555;"
-    f" border-radius:4px; background:#252525; }}"
-    f" QCheckBox::indicator:checked {{ background:{_ACCENT}; border-color:{_ACCENT}; }}"
-)
+def _input_style(theme: Theme) -> str:
+    return (
+        f"QLineEdit {{ background:{theme.input_bg}; color:{theme.text}; border:1px solid {theme.divider};"
+        f" border-radius:5px; padding:6px 10px; font-size:13px; }}"
+    )
+
+
+def _btn_accent_style(theme: Theme) -> str:
+    return (
+        f"QPushButton {{ background:{theme.accent}; color:#fff; border:none; border-radius:6px; "
+        f"padding:8px 18px; font-size:13px; }} "
+        f"QPushButton:hover {{ background:{theme.accent_h}; }}"
+    )
+
+
+def _btn_neutral_style(theme: Theme) -> str:
+    return (
+        f"QPushButton {{ background:{theme.btn_neutral_bg}; color:{theme.text}; border:none; "
+        f"border-radius:6px; padding:8px 18px; font-size:13px; }} "
+        f"QPushButton:hover {{ background:{theme.btn_neutral_hover}; }}"
+    )
 
 
 class SettingsScreen(QWidget):
@@ -85,61 +83,72 @@ class SettingsScreen(QWidget):
         self._engine          = engine
         self._session_manager = session_manager
         self._selected_model_path: Optional[str] = None
+        self._theme: Theme = ThemeManager.current()
 
         self._build_ui()
+        self._refresh_model_status()
+
+    # ── API pública ───────────────────────────────────────────────────────
+
+    def set_engine(self, engine: InferenceEngine) -> None:
+        self._engine = engine
         self._refresh_model_status()
 
     # ── Construcción de UI ────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.setStyleSheet(f"background: {_BG}; color: {_TEXT};")
+        t = self._theme
+        self.setStyleSheet(f"background: {t.bg}; color: {t.text};")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 20)
         outer.setSpacing(0)
 
         # Título
-        title = QLabel("Ajustes")
-        title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {_TEXT};")
-        outer.addWidget(title)
+        self._lbl_title = QLabel("Ajustes")
+        self._lbl_title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {t.text};")
+        outer.addWidget(self._lbl_title)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #2A2A2A;")
+        self._sep = QFrame()
+        self._sep.setFrameShape(QFrame.Shape.HLine)
+        self._sep.setStyleSheet(f"color: {t.divider};")
         outer.addSpacing(10)
-        outer.addWidget(sep)
+        outer.addWidget(self._sep)
         outer.addSpacing(16)
 
         # Área scrollable
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        outer.addWidget(scroll)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        outer.addWidget(self._scroll)
 
-        content = QWidget()
-        content.setStyleSheet(f"background: {_BG};")
-        scroll.setWidget(content)
+        self._scroll_content = QWidget()
+        self._scroll_content.setStyleSheet(f"background: {t.bg};")
+        self._scroll.setWidget(self._scroll_content)
 
-        vbox = QVBoxLayout(content)
+        vbox = QVBoxLayout(self._scroll_content)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(20)
 
-        vbox.addWidget(self._build_model_group())
-        vbox.addWidget(self._build_camera_group())
-        vbox.addWidget(self._build_consent_group())
-        vbox.addWidget(self._build_about_group())
+        self._grp_model      = self._build_model_group()
+        self._grp_appearance = self._build_appearance_group()
+        self._grp_about      = self._build_about_group()
+
+        vbox.addWidget(self._grp_model)
+        vbox.addWidget(self._grp_appearance)
+        vbox.addWidget(self._grp_about)
         vbox.addStretch()
 
     # ── Sección: Modelo ───────────────────────────────────────────────────
 
     def _build_model_group(self) -> QGroupBox:
+        t = self._theme
         grp = QGroupBox("Modelo de inferencia")
-        grp.setStyleSheet(_GROUP_STYLE)
+        grp.setStyleSheet(_group_style(t))
         vbox = QVBoxLayout(grp)
         vbox.setSpacing(10)
 
-        # Ruta actual
         self._model_path_edit = QLineEdit()
-        self._model_path_edit.setStyleSheet(_INPUT_STYLE)
+        self._model_path_edit.setStyleSheet(_input_style(t))
         self._model_path_edit.setReadOnly(True)
         self._model_path_edit.setPlaceholderText("Ningún modelo cargado")
         if self._engine.is_ready:
@@ -147,14 +156,16 @@ class SettingsScreen(QWidget):
         vbox.addWidget(self._model_path_edit)
 
         btn_row = QHBoxLayout()
-        btn_browse = QPushButton("📂  Examinar…")
-        btn_browse.setStyleSheet(_BTN_NEUTRAL)
-        btn_browse.setFixedHeight(34)
-        btn_browse.clicked.connect(self._browse_model)
-        btn_row.addWidget(btn_browse)
+        self._btn_browse = QPushButton("Examinar…")
+        self._btn_browse.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        self._btn_browse.setIconSize(QSize(16, 16))
+        self._btn_browse.setStyleSheet(_btn_neutral_style(t))
+        self._btn_browse.setFixedHeight(34)
+        self._btn_browse.clicked.connect(self._browse_model)
+        btn_row.addWidget(self._btn_browse)
 
         self._btn_load_model = QPushButton("Cargar modelo")
-        self._btn_load_model.setStyleSheet(_BTN_ACCENT)
+        self._btn_load_model.setStyleSheet(_btn_accent_style(t))
         self._btn_load_model.setFixedHeight(34)
         self._btn_load_model.setEnabled(False)
         self._btn_load_model.clicked.connect(self._load_model)
@@ -162,88 +173,121 @@ class SettingsScreen(QWidget):
         btn_row.addStretch()
         vbox.addLayout(btn_row)
 
-        # Estado del modelo
         self._lbl_model_status = QLabel()
-        self._lbl_model_status.setStyleSheet(f"font-size: 12px; color: {_SUBTEXT};")
+        self._lbl_model_status.setStyleSheet(f"font-size: 12px; color: {t.subtext};")
         vbox.addWidget(self._lbl_model_status)
 
         return grp
 
-    # ── Sección: Cámara ───────────────────────────────────────────────────
+    # ── Sección: Apariencia ───────────────────────────────────────────────
 
-    def _build_camera_group(self) -> QGroupBox:
-        grp = QGroupBox("Cámara")
-        grp.setStyleSheet(_GROUP_STYLE)
+    def _build_appearance_group(self) -> QGroupBox:
+        t = self._theme
+        grp = QGroupBox("Apariencia")
+        grp.setStyleSheet(_group_style(t))
         vbox = QVBoxLayout(grp)
-        vbox.setSpacing(10)
+        vbox.setSpacing(12)
 
-        form = QFormLayout()
-        form.setSpacing(10)
+        desc = QLabel("Selecciona el tema de la interfaz:")
+        desc.setStyleSheet(f"color: {t.subtext}; font-size: 12px;")
+        vbox.addWidget(desc)
 
-        self._camera_combo = QComboBox()
-        self._camera_combo.setStyleSheet(
-            f"QComboBox {{ background:#252525; color:{_TEXT}; border:1px solid #333;"
-            f" border-radius:5px; padding:5px 10px; font-size:13px; }}"
-        )
-        self._camera_combo.addItem("Cargando…")
-        form.addRow(QLabel("Índice de cámara:"), self._camera_combo)
-        vbox.addLayout(form)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
 
-        btn_detect = QPushButton("🔍  Detectar cámaras")
-        btn_detect.setStyleSheet(_BTN_NEUTRAL)
-        btn_detect.setFixedHeight(34)
-        btn_detect.clicked.connect(self._detect_cameras)
-        vbox.addWidget(btn_detect, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._btn_dark = QPushButton("Oscuro")
+        self._btn_dark.setFixedHeight(34)
+        self._btn_dark.clicked.connect(self._set_dark)
 
+        self._btn_light = QPushButton("Claro")
+        self._btn_light.setFixedHeight(34)
+        self._btn_light.clicked.connect(self._set_light)
+
+        btn_row.addWidget(self._btn_dark)
+        btn_row.addWidget(self._btn_light)
+        btn_row.addStretch()
+        vbox.addLayout(btn_row)
+
+        self._grp_appearance_desc = desc
+        self._refresh_theme_buttons()
         return grp
 
-    # ── Sección: Consentimiento ───────────────────────────────────────────
-
-    def _build_consent_group(self) -> QGroupBox:
-        grp = QGroupBox("Consentimiento informado (RB07)")
-        grp.setStyleSheet(_GROUP_STYLE)
-        vbox = QVBoxLayout(grp)
-        vbox.setSpacing(10)
-
-        info = QLabel(
-            "Este sistema analiza expresiones faciales mediante cámara.\n"
-            "Los datos de video no se transmiten externamente.\n"
-            "Las sesiones se almacenan localmente y pueden eliminarse desde el Historial."
-        )
-        info.setStyleSheet(f"color: {_SUBTEXT}; font-size: 12px;")
-        info.setWordWrap(True)
-        vbox.addWidget(info)
-
-        self._chk_consent = QCheckBox("Entiendo y doy mi consentimiento para el análisis facial")
-        self._chk_consent.setStyleSheet(_CHECKBOX_STYLE)
-        vbox.addWidget(self._chk_consent)
-
-        return grp
+    def _refresh_theme_buttons(self) -> None:
+        t = self._theme
+        is_dark = ThemeManager.is_dark()
+        # El botón activo usa acento; el inactivo usa neutral
+        active_style = _btn_accent_style(t)
+        neutral_style = _btn_neutral_style(t)
+        self._btn_dark.setStyleSheet(active_style if is_dark else neutral_style)
+        self._btn_light.setStyleSheet(neutral_style if is_dark else active_style)
 
     # ── Sección: Acerca de ────────────────────────────────────────────────
 
     def _build_about_group(self) -> QGroupBox:
+        t = self._theme
         grp = QGroupBox("Acerca de")
-        grp.setStyleSheet(_GROUP_STYLE)
+        grp.setStyleSheet(_group_style(t))
         vbox = QVBoxLayout(grp)
 
-        about_text = QLabel(
+        self._about_text = QLabel(
             "MicroExpression Analyzer  v1.0.0\n\n"
             "Modelo: FlowClassifier (DenseNet / ResNet + Optical Flow)\n"
             "Framework: PyQt6 · PyTorch · MediaPipe · OpenCV\n\n"
             "Trabajo Terminal — Análisis de Microexpresiones Faciales"
         )
-        about_text.setStyleSheet(f"color: {_SUBTEXT}; font-size: 12px; line-height: 1.6;")
-        about_text.setWordWrap(True)
-        vbox.addWidget(about_text)
+        self._about_text.setStyleSheet(f"color: {t.subtext}; font-size: 12px; line-height: 1.6;")
+        self._about_text.setWordWrap(True)
+        vbox.addWidget(self._about_text)
 
         return grp
+
+    # ── Tema ──────────────────────────────────────────────────────────────
+
+    def apply_theme(self, theme: Theme) -> None:
+        self._theme = theme
+        t = theme
+
+        self.setStyleSheet(f"background: {t.bg}; color: {t.text};")
+        self._lbl_title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {t.text};")
+        self._sep.setStyleSheet(f"color: {t.divider};")
+        self._scroll_content.setStyleSheet(f"background: {t.bg};")
+
+        # Grupos
+        gs = _group_style(t)
+        self._grp_model.setStyleSheet(gs)
+        self._grp_appearance.setStyleSheet(gs)
+        self._grp_about.setStyleSheet(gs)
+
+        # Modelo
+        self._model_path_edit.setStyleSheet(_input_style(t))
+        self._btn_browse.setStyleSheet(_btn_neutral_style(t))
+        self._btn_load_model.setStyleSheet(_btn_accent_style(t))
+        self._lbl_model_status.setStyleSheet(f"font-size: 12px; color: {t.subtext};")
+
+        # Apariencia
+        self._grp_appearance_desc.setStyleSheet(f"color: {t.subtext}; font-size: 12px;")
+        self._refresh_theme_buttons()
+
+        # Acerca de
+        self._about_text.setStyleSheet(f"color: {t.subtext}; font-size: 12px; line-height: 1.6;")
+
+        # Refrescar estado del modelo (puede cambiar colores)
+        self._refresh_model_status()
 
     # ── Acciones ──────────────────────────────────────────────────────────
 
     @pyqtSlot()
+    def _set_dark(self) -> None:
+        from app.ui.theme import DARK
+        ThemeManager.set_theme(DARK)
+
+    @pyqtSlot()
+    def _set_light(self) -> None:
+        from app.ui.theme import LIGHT
+        ThemeManager.set_theme(LIGHT)
+
+    @pyqtSlot()
     def _browse_model(self) -> None:
-        # Empezar en la carpeta models/ del proyecto si existe, si no en home
         _models_dir = Path(__file__).resolve().parent.parent.parent / "models"
         start_dir = str(_models_dir) if _models_dir.is_dir() else str(Path.home())
         path, _ = QFileDialog.getOpenFileName(
@@ -269,19 +313,6 @@ class SettingsScreen(QWidget):
         self.model_changed.emit(self._selected_model_path)
         self._refresh_model_status()
 
-    @pyqtSlot()
-    def _detect_cameras(self) -> None:
-        self._camera_combo.clear()
-        self._camera_combo.addItem("Buscando…")
-        # Operación síncrona (breve); para producción usar QThread
-        available = get_available_cameras(max_index=5)
-        self._camera_combo.clear()
-        if available:
-            for idx in available:
-                self._camera_combo.addItem(f"Cámara {idx}", userData=idx)
-        else:
-            self._camera_combo.addItem("No se encontraron cámaras")
-
     def _refresh_model_status(self) -> None:
         if self._engine.is_ready:
             n = len(self._engine.label_map)
@@ -290,15 +321,3 @@ class SettingsScreen(QWidget):
         else:
             self._lbl_model_status.setText("✘ Sin modelo cargado")
             self._lbl_model_status.setStyleSheet(f"color: {_RED}; font-size: 12px;")
-
-    # ── Accesores ─────────────────────────────────────────────────────────
-
-    @property
-    def selected_camera_index(self) -> int:
-        """Índice de cámara seleccionado actualmente."""
-        data = self._camera_combo.currentData()
-        return data if isinstance(data, int) else 0
-
-    @property
-    def consent_given(self) -> bool:
-        return self._chk_consent.isChecked()

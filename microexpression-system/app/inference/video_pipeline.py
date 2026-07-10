@@ -50,6 +50,25 @@ from app.inference.camera_pipeline import (
 from app.inference.inference_engine import InferenceEngine, InferenceResult
 
 
+def _crop_face_bbox(frame: np.ndarray, bbox: tuple, out: int = 224) -> bytes:
+    """
+    Recorta la cara del frame BGR usando el bounding box, añade padding
+    proporcional al tamaño de la caja (15%) y redimensiona a out×out.
+    Devuelve JPEG bytes; bytes vacíos si falla.
+    """
+    x1, y1, x2, y2 = bbox
+    h, w = frame.shape[:2]
+    pad = max(8, int(min(x2 - x1, y2 - y1) * 0.15))
+    xc1, yc1 = max(0, x1 - pad), max(0, y1 - pad)
+    xc2, yc2 = min(w, x2 + pad), min(h, y2 + pad)
+    crop = frame[yc1:yc2, xc1:xc2]
+    if crop.size == 0:
+        return b""
+    resized = cv2.resize(crop, (out, out), interpolation=cv2.INTER_LINEAR)
+    ok, buf = cv2.imencode(".jpg", resized, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return bytes(buf) if ok else b""
+
+
 class VideoPipeline(QThread):
     """
     Hilo de procesamiento de video + inferencia de microexpresiones.
@@ -64,13 +83,14 @@ class VideoPipeline(QThread):
         pipeline.stop()   # detener antes de tiempo si se necesita
     """
 
-    frame_ready           = pyqtSignal(bytes)    # JPEG preview frame original
-    annotated_frame_ready = pyqtSignal(bytes)    # JPEG preview con landmarks/ROI
-    gradcam_ready         = pyqtSignal(bytes)    # JPEG heatmap Grad-CAM (si está activo)
-    shap_ready            = pyqtSignal(bytes)    # JPEG heatmap SHAP (si está activo)
-    progress              = pyqtSignal(int, int)  # (frame_actual, total_frames)
-    sequence_result       = pyqtSignal(object)    # InferenceResult
-    finished_processing   = pyqtSignal(int)       # total secuencias procesadas
+    frame_ready           = pyqtSignal(bytes)              # JPEG preview frame original
+    annotated_frame_ready = pyqtSignal(bytes)              # JPEG preview con landmarks/ROI
+    # XAI: (xai_jpeg, face_jpeg, confidence, emotion) — solo para momentos no-neutros/inciertos
+    gradcam_ready         = pyqtSignal(bytes, bytes, float, str)
+    shap_ready            = pyqtSignal(bytes, bytes, float, str)
+    progress              = pyqtSignal(int, int)       # (frame_actual, total_frames)
+    sequence_result       = pyqtSignal(object)         # InferenceResult
+    finished_processing   = pyqtSignal(int)            # total secuencias procesadas
     error                 = pyqtSignal(str)
 
     def __init__(
@@ -223,7 +243,11 @@ class VideoPipeline(QThread):
                             self.sequence_result.emit(result)
                             seq_count += 1
 
-                            # ── Grad-CAM (opcional) ───────────────────────
+                            # ── XAI: siempre computa (display en tiempo real)
+                            # El filtrado de qué guardar en resultados
+                            # ocurre en analysis_screen._collect_top_xai.
+                            face_jpg = _crop_face_bbox(frame, bbox)
+
                             if self._gradcam_enabled:
                                 try:
                                     heatmap = self._engine.compute_gradcam(
@@ -232,28 +256,36 @@ class VideoPipeline(QThread):
                                     if heatmap is not None:
                                         ok_enc, buf = cv2.imencode(
                                             ".jpg", heatmap,
-                                            [cv2.IMWRITE_JPEG_QUALITY, 90]
+                                            [cv2.IMWRITE_JPEG_QUALITY, 90],
                                         )
                                         if ok_enc:
-                                            self.gradcam_ready.emit(bytes(buf))
+                                            self.gradcam_ready.emit(
+                                                bytes(buf), face_jpg,
+                                                float(result.confidence),
+                                                result.emotion,
+                                            )
                                 except Exception:
-                                    pass  # GradCAM no bloquea el pipeline
+                                    pass
 
-                            # ── SHAP (opcional) ───────────────────────────
                             if self._shap_enabled:
                                 try:
                                     shap_map = self._engine.compute_shap(
-                                        seq_array, result=result, out_size=(224, 224)
+                                        seq_array, result=result,
+                                        out_size=(224, 224), n_steps=5,
                                     )
                                     if shap_map is not None:
                                         ok_enc, buf = cv2.imencode(
                                             ".jpg", shap_map,
-                                            [cv2.IMWRITE_JPEG_QUALITY, 90]
+                                            [cv2.IMWRITE_JPEG_QUALITY, 90],
                                         )
                                         if ok_enc:
-                                            self.shap_ready.emit(bytes(buf))
+                                            self.shap_ready.emit(
+                                                bytes(buf), face_jpg,
+                                                float(result.confidence),
+                                                result.emotion,
+                                            )
                                 except Exception:
-                                    pass  # SHAP no bloquea el pipeline
+                                    pass
 
                         except Exception as exc:
                             self.error.emit(f"Error en inferencia: {exc}")

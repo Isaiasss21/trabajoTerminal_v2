@@ -17,79 +17,82 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
-    QMessageBox, QAbstractItemView, QFileDialog,
+    QMessageBox, QAbstractItemView, QFileDialog, QStyle,
 )
 
 from app.storage.session_manager import SessionManager, SessionMeta
+from app.ui.theme import Theme, ThemeManager
 
 
-# ── Colores ────────────────────────────────────────────────────────────────────
+# ── Colores semánticos fijos ──────────────────────────────────────────────────
 
-_BG      = "#121212"
-_SURFACE = "#1E1E1E"
-_ACCENT  = "#2979FF"
-_TEXT    = "#E0E0E0"
-_SUBTEXT = "#9E9E9E"
-_GREEN   = "#4CAF50"
-_RED     = "#F44336"
-_AMBER   = "#FFC107"
-
-_BTN_BASE = "QPushButton {{ background:{bg}; color:{fg}; border:none; border-radius:6px; padding:7px 16px; font-size:12px; }} QPushButton:hover {{ background:{hov}; }} QPushButton:disabled {{ background:#424242; color:#757575; }}"
-_BTN_ACCENT = _BTN_BASE.format(bg=_ACCENT, fg="#fff", hov="#5499FF")
-_BTN_RED    = _BTN_BASE.format(bg=_RED, fg="#fff", hov="#EF5350")
-_BTN_NEUTRAL = _BTN_BASE.format(bg="#333", fg=_TEXT, hov="#444")
-
-_TABLE_STYLE = f"""
-QTableWidget {{
-    background: {_SURFACE};
-    color: {_TEXT};
-    border: none;
-    gridline-color: #2A2A2A;
-    font-size: 13px;
-    border-radius: 8px;
-    selection-background-color: rgba(41,121,255,0.25);
-}}
-QTableWidget::item {{
-    padding: 6px 10px;
-}}
-QHeaderView::section {{
-    background: #252525;
-    color: {_SUBTEXT};
-    border: none;
-    border-bottom: 1px solid #333;
-    padding: 8px 10px;
-    font-size: 12px;
-    font-weight: bold;
-}}
-QScrollBar:vertical {{
-    background: #1A1A1A;
-    width: 8px;
-    border-radius: 4px;
-}}
-QScrollBar::handle:vertical {{
-    background: #444;
-    border-radius: 4px;
-}}
-"""
+_GREEN = "#4CAF50"
+_RED   = "#F44336"
+_AMBER = "#FFC107"
 
 _COLUMNS = ["Fecha / Hora", "Predicciones", "Válidas", "Emoción dominante",
             "Confianza media", "Duración (s)"]
 
 
+def _table_style(theme: Theme) -> str:
+    t = theme
+    return f"""
+QTableWidget {{
+    background: {t.surface};
+    color: {t.text};
+    border: none;
+    gridline-color: {t.divider};
+    font-size: 13px;
+    border-radius: 8px;
+    selection-background-color: {t.accent_alpha};
+}}
+QTableWidget::item {{
+    padding: 6px 10px;
+}}
+QHeaderView::section {{
+    background: {t.table_header_bg};
+    color: {t.subtext};
+    border: none;
+    border-bottom: 1px solid {t.divider};
+    padding: 8px 10px;
+    font-size: 12px;
+    font-weight: bold;
+}}
+QScrollBar:vertical {{
+    background: {t.scrollbar_bg};
+    width: 8px;
+    border-radius: 4px;
+}}
+QScrollBar::handle:vertical {{
+    background: {t.scrollbar_handle};
+    border-radius: 4px;
+}}
+"""
+
+
+def _btn_style(bg: str, fg: str, hover: str) -> str:
+    return (
+        f"QPushButton {{ background:{bg}; color:{fg}; border:none; border-radius:6px; "
+        f"padding:7px 16px; font-size:12px; }} "
+        f"QPushButton:hover {{ background:{hover}; }} "
+        f"QPushButton:disabled {{ background:#424242; color:#757575; }}"
+    )
+
+
 class HistoryScreen(QWidget):
     """Pantalla de historial de sesiones pasadas."""
 
-    # Emitido cuando el usuario quiere ver los resultados de una sesión
     view_session_requested = pyqtSignal(str)  # session_id
 
     def __init__(self, session_manager: SessionManager, parent=None) -> None:
         super().__init__(parent)
         self._session_manager = session_manager
         self._metas: list[SessionMeta] = []
+        self._theme: Theme = ThemeManager.current()
 
         self._build_ui()
         self.refresh()
@@ -105,35 +108,40 @@ class HistoryScreen(QWidget):
     # ── Construcción de UI ────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.setStyleSheet(f"background: {_BG}; color: {_TEXT};")
+        t = self._theme
+        self.setStyleSheet(f"background: {t.bg}; color: {t.text};")
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(14)
 
         # Título + botones globales
         header = QHBoxLayout()
-        lbl = QLabel("Historial de sesiones")
-        lbl.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {_TEXT};")
-        header.addWidget(lbl)
+        self._lbl_header = QLabel("Historial de sesiones")
+        self._lbl_header.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {t.text};")
+        header.addWidget(self._lbl_header)
         header.addStretch()
 
-        self._btn_refresh = QPushButton("↺  Actualizar")
-        self._btn_refresh.setStyleSheet(_BTN_NEUTRAL)
+        self._btn_refresh = QPushButton("Actualizar")
+        self._btn_refresh.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self._btn_refresh.setIconSize(QSize(16, 16))
+        self._btn_refresh.setStyleSheet(
+            _btn_style(t.btn_neutral_bg, t.text, t.btn_neutral_hover)
+        )
         self._btn_refresh.setFixedHeight(34)
         self._btn_refresh.clicked.connect(self.refresh)
         header.addWidget(self._btn_refresh)
 
         root.addLayout(header)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #2A2A2A;")
-        root.addWidget(sep)
+        self._sep = QFrame()
+        self._sep.setFrameShape(QFrame.Shape.HLine)
+        self._sep.setStyleSheet(f"color: {t.divider};")
+        root.addWidget(self._sep)
 
         # Tabla
         self._table = QTableWidget(0, len(_COLUMNS))
         self._table.setHorizontalHeaderLabels(_COLUMNS)
-        self._table.setStyleSheet(_TABLE_STYLE)
+        self._table.setStyleSheet(_table_style(t))
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -148,15 +156,21 @@ class HistoryScreen(QWidget):
         action_bar = QHBoxLayout()
         action_bar.setSpacing(10)
 
-        self._btn_view = QPushButton("👁  Ver resultados")
-        self._btn_view.setStyleSheet(_BTN_ACCENT)
+        self._btn_view = QPushButton("Ver resultados")
+        self._btn_view.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
+        self._btn_view.setIconSize(QSize(16, 16))
+        self._btn_view.setStyleSheet(_btn_style(t.accent, "#fff", t.accent_h))
         self._btn_view.setFixedHeight(34)
         self._btn_view.setEnabled(False)
         self._btn_view.clicked.connect(self._view_selected)
         action_bar.addWidget(self._btn_view)
 
-        self._btn_export = QPushButton("⬇  Exportar CSV")
-        self._btn_export.setStyleSheet(_BTN_NEUTRAL)
+        self._btn_export = QPushButton("Exportar CSV")
+        self._btn_export.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+        self._btn_export.setIconSize(QSize(16, 16))
+        self._btn_export.setStyleSheet(
+            _btn_style(t.btn_neutral_bg, t.text, t.btn_neutral_hover)
+        )
         self._btn_export.setFixedHeight(34)
         self._btn_export.setEnabled(False)
         self._btn_export.clicked.connect(self._export_selected)
@@ -164,8 +178,10 @@ class HistoryScreen(QWidget):
 
         action_bar.addStretch()
 
-        self._btn_delete = QPushButton("🗑  Eliminar")
-        self._btn_delete.setStyleSheet(_BTN_RED)
+        self._btn_delete = QPushButton("Eliminar")
+        self._btn_delete.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        self._btn_delete.setIconSize(QSize(16, 16))
+        self._btn_delete.setStyleSheet(_btn_style(_RED, "#fff", "#EF5350"))
         self._btn_delete.setFixedHeight(34)
         self._btn_delete.setEnabled(False)
         self._btn_delete.clicked.connect(self._delete_selected)
@@ -174,8 +190,28 @@ class HistoryScreen(QWidget):
         root.addLayout(action_bar)
 
         self._lbl_count = QLabel("")
-        self._lbl_count.setStyleSheet(f"color: {_SUBTEXT}; font-size: 11px;")
+        self._lbl_count.setStyleSheet(f"color: {t.subtext}; font-size: 11px;")
         root.addWidget(self._lbl_count)
+
+    # ── Tema ──────────────────────────────────────────────────────────────
+
+    def apply_theme(self, theme: Theme) -> None:
+        self._theme = theme
+        t = theme
+
+        self.setStyleSheet(f"background: {t.bg}; color: {t.text};")
+        self._lbl_header.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {t.text};")
+        self._sep.setStyleSheet(f"color: {t.divider};")
+        self._lbl_count.setStyleSheet(f"color: {t.subtext}; font-size: 11px;")
+
+        # Botones
+        self._btn_refresh.setStyleSheet(_btn_style(t.btn_neutral_bg, t.text, t.btn_neutral_hover))
+        self._btn_view.setStyleSheet(_btn_style(t.accent, "#fff", t.accent_h))
+        self._btn_export.setStyleSheet(_btn_style(t.btn_neutral_bg, t.text, t.btn_neutral_hover))
+        self._btn_delete.setStyleSheet(_btn_style(_RED, "#fff", "#EF5350"))
+
+        # Tabla
+        self._table.setStyleSheet(_table_style(t))
 
     # ── Tabla ─────────────────────────────────────────────────────────────
 
@@ -185,7 +221,6 @@ class HistoryScreen(QWidget):
             row = self._table.rowCount()
             self._table.insertRow(row)
 
-            # Formatear fecha
             dt_str = meta.created_at[:19].replace("T", "  ") if meta.created_at else "–"
 
             cells = [

@@ -1,0 +1,10 @@
+{
+  "label_map": {
+    "asco":      0,
+    "felicidad": 1,
+    "neutral":   2,
+    "sorpresa":  3,
+    "tristeza":  4
+  },
+  "note": "5 clases (sin miedo, sin enojo). ResNet34 + Transformer temporal pool + GeM backbone pool."
+}

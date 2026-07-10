@@ -16,13 +16,16 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Optional
 
+from app.inference.inference_engine import (
+    CONFIDENCE_VALID,
+    CONFIDENCE_UNCERTAIN,
+)
+
 # ── Constantes de reglas de negocio ────────────────────────────────────────────
 
-CONFIDENCE_VALID   = 0.70   # RB02: umbral mínimo de confianza aceptable
-CONFIDENCE_UNCERTAIN = 0.50 # RB02: zona incierta
-DURATION_MIN_MS    = 100    # RB01: mínimo de duración de microexpresión
-DURATION_MAX_MS    = 500    # RB01: máximo de duración de microexpresión
-LANDMARK_QUALITY   = 0.60   # RB03: fracción mínima de frames con landmarks
+DURATION_MIN_MS  = 100   # RB01: mínimo de duración de microexpresión
+DURATION_MAX_MS  = 500   # RB01: máximo de duración de microexpresión
+LANDMARK_QUALITY = 0.60  # RB03: fracción mínima de frames con landmarks
 
 
 # ── Estructuras de datos de salida ──────────────────────────────────────────────
@@ -77,7 +80,6 @@ class StatsEngine:
             p for p in predictions
             if p.is_valid
             and DURATION_MIN_MS <= p.duration_ms <= DURATION_MAX_MS
-            and p.confidence >= CONFIDENCE_VALID
         ]
         discarded = len(predictions) - len(valid)
 
